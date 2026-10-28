@@ -1,0 +1,12 @@
+go-slug
+Copyright (c) 2026 Dhannyell Lukas
+
+This project contains code derived from the Slug reference shaders
+(https://github.com/EricLengyel/Slug).
+Slug shader code Copyright 2017 by Eric Lengyel.
+Used under the MIT License. The full text is in LICENSES/Slug-MIT.txt.
+
+The Slug algorithm is described in:
+Eric Lengyel, "GPU-Centered Font Rendering Directly from Glyph Outlines",
+Journal of Computer Graphics Techniques, vol. 6, no. 2, 2017.
+https://jcgt.org/published/0006/02/02/
