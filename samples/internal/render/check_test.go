@@ -34,6 +34,8 @@ func TestGPUMatchesCPU(t *testing.T) {
 		{"zoom", []float64{scene.ZoomPeriod / 4, scene.ZoomPeriod / 2}, small},
 		// The turn is largest at 3 s, and at 9 s it has the other sign.
 		{"perspective", []float64{0, 3, 9}, small},
+		// The start has the floor at the lowest angle, and the half is near the cube.
+		{"hall", []float64{0, 4, scene.HallPeriod / 4, scene.HallPeriod / 2}, small},
 	}
 
 	backends := []struct {
@@ -61,7 +63,7 @@ func TestGPUMatchesCPU(t *testing.T) {
 				}
 				for _, at := range c.times {
 					for _, sz := range c.sizes {
-						d, err := Check(device, s, s.View(at, sz.w, sz.h), sz.w, sz.h)
+						d, err := Check(device, s, s.Frame(at, sz.w, sz.h), sz.w, sz.h)
 						if err != nil {
 							t.Fatal(err)
 						}

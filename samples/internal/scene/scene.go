@@ -39,6 +39,7 @@ const (
 	sourceFont uint32 = iota
 	sourceShape
 	sourceShaped
+	sourceHall
 )
 
 // Item places one entry of the pack.
@@ -48,6 +49,15 @@ type Item struct {
 	Color [4]float32
 }
 
+// Span is a range of Items that one matrix draws.
+type Span struct {
+	First, Count int
+	View         Projection // from the coordinates of the items to target pixels
+}
+
+// MaxSpans is the largest number of spans in a frame.
+const MaxSpans = 32
+
 // Scene is the pack, the items that use it, and the camera.
 type Scene struct {
 	Name     string
@@ -55,34 +65,44 @@ type Scene struct {
 	Pack     slug.Pack
 	Items    []Item
 
-	view func(t float64, w, h int) Projection
+	frame func(t float64, w, h int) []Span
 }
 
 // Names lists the scenes that New can build.
-var Names = []string{"overview", "zoom", "perspective", "text"}
+var Names = []string{"overview", "zoom", "perspective", "text", "hall"}
 
 // New builds the scene with the given name.
 func New(name string) (*Scene, error) {
 	s := &Scene{Name: name}
 	switch name {
 	case "overview":
-		s.view = still
+		s.frame = s.whole(still)
 		return s, s.overview()
 	case "zoom":
-		s.Animated, s.view = true, zoom
+		s.Animated, s.frame = true, s.whole(zoom)
 		return s, s.overview()
 	case "perspective":
-		s.Animated, s.view = true, perspective
+		s.Animated, s.frame = true, s.whole(perspective)
 		return s, s.overview()
 	case "text":
-		s.view = still
+		s.frame = s.whole(still)
 		return s, s.shaped()
+	case "hall":
+		return s, s.hall()
 	}
 	return nil, fmt.Errorf("scene: no scene %q", name)
 }
 
-// View returns the camera at t seconds, for a target of w by h pixels.
-func (s *Scene) View(t float64, w, h int) Projection { return s.view(t, w, h) }
+// Frame returns the spans at t seconds, for a target of w by h pixels, in the order
+// from back to front.
+func (s *Scene) Frame(t float64, w, h int) []Span { return s.frame(t, w, h) }
+
+// whole draws all items of the scene through one view.
+func (s *Scene) whole(view func(t float64, w, h int) Projection) func(float64, int, int) []Span {
+	return func(t float64, w, h int) []Span {
+		return []Span{{0, len(s.Items), view(t, w, h)}}
+	}
+}
 
 func (s *Scene) overview() error {
 	f, err := font.Parse(goregular.TTF)
@@ -265,33 +285,43 @@ func perspective(t float64, w, h int) Projection {
 }
 
 // Rasterize draws the scene on the CPU, over Background.
-func (s *Scene) Rasterize(w, h int, view Projection) (*image.RGBA, error) {
+func (s *Scene) Rasterize(w, h int, frame []Span) (*image.RGBA, error) {
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(dst, dst.Bounds(), image.NewUniform(Background), image.Point{}, draw.Src)
-	if view.IsAffine() {
-		m := view.Tangent(0, 0)
-		for _, it := range s.Items {
+	for _, span := range frame {
+		if err := s.rasterizeSpan(span, dst); err != nil {
+			return nil, err
+		}
+	}
+	return dst, nil
+}
+
+func (s *Scene) rasterizeSpan(span Span, dst *image.RGBA) error {
+	items := s.Items[span.First:][:span.Count]
+	if span.View.IsAffine() {
+		m := span.View.Tangent(0, 0)
+		for _, it := range items {
 			if err := s.Pack.Rasterize(it.Entry, it.Place.Then(m), it.Color, dst); err != nil {
-				return nil, err
+				return err
 			}
 		}
-		return dst, nil
+		return nil
 	}
-	for _, it := range s.Items {
+	for _, it := range items {
 		if it.Entry.LayerCount == 0 {
 			continue
 		}
-		area := reach(it, view).Intersect(dst.Rect)
+		area := reach(it, span.View).Intersect(dst.Rect)
 		for y := area.Min.Y; y < area.Max.Y; y++ {
 			for x := area.Min.X; x < area.Max.X; x++ {
 				px := dst.SubImage(image.Rect(x, y, x+1, y+1)).(*image.RGBA)
-				if err := s.Pack.Rasterize(it.Entry, it.Place.Then(pixelView(view, x, y)), it.Color, px); err != nil {
-					return nil, err
+				if err := s.Pack.Rasterize(it.Entry, it.Place.Then(pixelView(span.View, x, y)), it.Color, px); err != nil {
+					return err
 				}
 			}
 		}
 	}
-	return dst, nil
+	return nil
 }
 
 // pixelView returns the tangent of view at the center of one pixel. The tangent
@@ -302,40 +332,110 @@ func pixelView(view Projection, x, y int) slug.Affine {
 	return view.Tangent(dx, dy)
 }
 
+// Nearby is the part of a span that can touch one pixel.
+type Nearby struct {
+	Items []Item
+	View  Projection
+}
+
 // Near returns the items that can touch the pixel x, y through a view moved by
-// less than one pixel.
-func (s *Scene) Near(view Projection, x, y int) []Item {
-	var near []Item
-	for _, it := range s.Items {
-		if it.Entry.LayerCount > 0 && image.Pt(x, y).In(reach(it, view)) {
-			near = append(near, it)
+// less than one pixel, in the order of the frame.
+func (s *Scene) Near(frame []Span, x, y int) []Nearby {
+	var near []Nearby
+	for _, span := range frame {
+		var items []Item
+		for _, it := range s.Items[span.First:][:span.Count] {
+			if it.Entry.LayerCount > 0 && image.Pt(x, y).In(reach(it, span.View)) {
+				items = append(items, it)
+			}
+		}
+		if items != nil {
+			near = append(near, Nearby{items, span.View})
 		}
 	}
 	return near
 }
 
-// Pixel draws one pixel on the CPU, with the items that Near returned.
-func (s *Scene) Pixel(items []Item, view Projection, x, y int) (color.RGBA, error) {
+// Pixel draws one pixel on the CPU, with the result of Near and the views moved by
+// dx and dy.
+func (s *Scene) Pixel(near []Nearby, dx, dy float64, x, y int) (color.RGBA, error) {
 	px := image.NewRGBA(image.Rect(x, y, x+1, y+1))
 	px.SetRGBA(x, y, Background)
-	m := pixelView(view, x, y)
-	for _, it := range items {
-		if err := s.Pack.Rasterize(it.Entry, it.Place.Then(m), it.Color, px); err != nil {
-			return color.RGBA{}, err
+	for _, n := range near {
+		m := pixelView(n.View.Moved(dx, dy), x, y)
+		for _, it := range n.Items {
+			if err := s.Pack.Rasterize(it.Entry, it.Place.Then(m), it.Color, px); err != nil {
+				return color.RGBA{}, err
+			}
 		}
 	}
 	return px.RGBAAt(x, y), nil
 }
 
-// reach returns the pixels near the bounds of an item, with a margin for the
-// antialiased edge.
+// QuadPixel draws one pixel with the sizes that a GPU computes for fwidth: the
+// differences between the pixels of a 2x2 block, and not the tangent. The first
+// row and column of the block give the coarse form, and the row and column of the
+// pixel give the fine form. A plane near its edge has a large difference.
+func (s *Scene) QuadPixel(near []Nearby, fine bool, x, y int) (color.RGBA, error) {
+	px := image.NewRGBA(image.Rect(x, y, x+1, y+1))
+	px.SetRGBA(x, y, Background)
+	left, top := x&^1, y&^1
+	row, column := top, left
+	if fine {
+		row, column = y, x
+	}
+	for _, n := range near {
+		inverse := n.View.Invert()
+		at := func(i, j int) (float64, float64) { return inverse.Apply(float64(i)+0.5, float64(j)+0.5) }
+		x0, y0 := at(left, row)
+		x1, y1 := at(left+1, row)
+		x2, y2 := at(column, top)
+		x3, y3 := at(column, top+1)
+		ux, vx, uy, vy := x1-x0, y1-y0, x3-x2, y3-y2
+		det := ux*vy - uy*vx
+		a, c, b, d := vy/det, -uy/det, -vx/det, ux/det
+		cx, cy := at(x, y)
+		m := slug.Affine{
+			float32(a), float32(b), float32(c), float32(d),
+			float32(float64(x) + 0.5 - a*cx - c*cy), float32(float64(y) + 0.5 - b*cx - d*cy),
+		}
+		for _, it := range n.Items {
+			if err := s.Pack.Rasterize(it.Entry, it.Place.Then(m), it.Color, px); err != nil {
+				return color.RGBA{}, err
+			}
+		}
+	}
+	return px.RGBAAt(x, y), nil
+}
+
+// reach returns the pixels near the bounds of an item, as the shader dilates them:
+// each corner moves by half of the size of a pixel in em space at that corner. A
+// plane near its edge has a large size, so the area is more than a small margin.
 func reach(it Item, view Projection) image.Rectangle {
 	const margin = 2
 	b := it.Entry.Bounds
 	x0, y0 := math.Inf(1), math.Inf(1)
 	x1, y1 := math.Inf(-1), math.Inf(-1)
-	for _, c := range []slug.Point{b.Min, {X: b.Max.X, Y: b.Min.Y}, {X: b.Min.X, Y: b.Max.Y}, b.Max} {
-		p := it.Place.Apply(c)
+	for _, c := range []struct{ em, side slug.Point }{
+		{b.Min, slug.Point{X: -1, Y: -1}},
+		{slug.Point{X: b.Max.X, Y: b.Min.Y}, slug.Point{X: 1, Y: -1}},
+		{slug.Point{X: b.Min.X, Y: b.Max.Y}, slug.Point{X: -1, Y: 1}},
+		{b.Max, slug.Point{X: 1, Y: 1}},
+	} {
+		p := it.Place.Apply(c.em)
+		inverse, ok := it.Place.Then(view.Tangent(float64(p.X), float64(p.Y))).Invert()
+		if !ok {
+			continue
+		}
+		moved := slug.Point{
+			X: c.em.X + c.side.X*(abs32(inverse[0])+abs32(inverse[2]))/2,
+			Y: c.em.Y + c.side.Y*(abs32(inverse[1])+abs32(inverse[3]))/2,
+		}
+		p = it.Place.Apply(moved)
+		// A corner behind the camera has no image, so the item can touch any pixel.
+		if view[6]*float64(p.X)+view[7]*float64(p.Y)+view[8] <= 0 {
+			return image.Rect(math.MinInt32, math.MinInt32, math.MaxInt32, math.MaxInt32)
+		}
 		x, y := view.Apply(float64(p.X), float64(p.Y))
 		x0, y0 = min(x0, x), min(y0, y)
 		x1, y1 = max(x1, x), max(y1, y)
@@ -360,6 +460,8 @@ func Label(dst *image.RGBA, x, y float32, str string) error {
 	}
 	return nil
 }
+
+func abs32(v float32) float32 { return float32(math.Abs(float64(v))) }
 
 func turn(degrees float64) slug.Affine {
 	sin, cos := math.Sincos(degrees * math.Pi / 180)

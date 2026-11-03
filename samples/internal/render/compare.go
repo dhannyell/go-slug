@@ -101,7 +101,7 @@ func (r *Renderer) presentCompare(target *wgpu.TextureView, t float64, w, h int)
 
 func (r *Renderer) newComparison(t float64, w, h int) (*comparison, error) {
 	pw, ph := max(w/2, 1), max(h/2, 1)
-	d, got, want, over, err := check(r.device, r.scene, r.scene.View(t, pw, ph), pw, ph)
+	d, got, want, over, err := check(r.device, r.scene, r.scene.Frame(t, pw, ph), pw, ph)
 	if err != nil {
 		return nil, err
 	}

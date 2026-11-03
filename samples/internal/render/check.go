@@ -5,6 +5,7 @@ package render
 import (
 	"fmt"
 	"image"
+	"image/color"
 
 	"github.com/dhannyell/webgpu/wgpu"
 
@@ -17,12 +18,13 @@ import (
 const Tolerance = 6
 
 // noise is the distance in pixels that the interpolation of a GPU can move a
-// sample, and noiseStep is the step of the search inside it. Slug coverage jumps
-// where the line of an edge passes a corner, because a ray sees a curve only inside
-// the span of the curve. A sample near that line can go to either side, and the
-// coverage changes quickly next to the jump, so a few distances can miss the value.
+// sample: a rasterizer can snap a vertex to 1/256 of a pixel. noiseStep is the step
+// of the search inside it. Slug coverage jumps where the line of an edge passes a
+// corner, because a ray sees a curve only inside the span of the curve. A sample
+// near that line can go to either side, and the coverage changes quickly next to
+// the jump, so a few distances can miss the value.
 const (
-	noise       = 1.0 / 512
+	noise       = 1.0 / 256
 	noiseStep   = 1.0 / 65536
 	searchLimit = 64
 )
@@ -39,20 +41,20 @@ func (d Diff) String() string {
 	return fmt.Sprintf("max difference %d/255 at %v, %d of %d pixels over %d", d.Max, d.Worst, d.Pixels, d.Total, Tolerance)
 }
 
-// Check draws s through view with the GPU and with the CPU, and compares the two
+// Check draws one frame of s with the GPU and with the CPU, and compares the two
 // images.
-func Check(device *wgpu.Device, s *scene.Scene, view scene.Projection, w, h int) (Diff, error) {
-	d, _, _, _, err := check(device, s, view, w, h)
+func Check(device *wgpu.Device, s *scene.Scene, frame []scene.Span, w, h int) (Diff, error) {
+	d, _, _, _, err := check(device, s, frame, w, h)
 	return d, err
 }
 
 // check returns the images of Check, and a mask of the pixels over Tolerance.
-func check(device *wgpu.Device, s *scene.Scene, view scene.Projection, w, h int) (d Diff, got, want *image.RGBA, over []bool, err error) {
-	got, err = Capture(device, s, view, w, h)
+func check(device *wgpu.Device, s *scene.Scene, frame []scene.Span, w, h int) (d Diff, got, want *image.RGBA, over []bool, err error) {
+	got, err = Capture(device, s, frame, w, h)
 	if err != nil {
 		return Diff{}, nil, nil, nil, err
 	}
-	want, err = s.Rasterize(w, h, view)
+	want, err = s.Rasterize(w, h, frame)
 	if err != nil {
 		return Diff{}, nil, nil, nil, err
 	}
@@ -67,7 +69,7 @@ func check(device *wgpu.Device, s *scene.Scene, view scene.Projection, w, h int)
 		// A broken shader fails in many pixels, and the search of a failed pixel
 		// is slow. After searchLimit failures, the first image is the oracle.
 		if worst > Tolerance && d.Pixels < searchLimit {
-			if worst, err = search(s, view, x, y, v, first); err != nil {
+			if worst, err = search(s, frame, x, y, v, first); err != nil {
 				return Diff{}, nil, nil, nil, err
 			}
 		}
@@ -82,22 +84,35 @@ func check(device *wgpu.Device, s *scene.Scene, view scene.Projection, w, h int)
 	return d, got, want, over, nil
 }
 
-// search moves the view around one pixel, and returns the distance from v to the
-// range of the colors that the CPU draws. It stops when the range reaches v.
-func search(s *scene.Scene, view scene.Projection, x, y int, v, first [4]uint8) (int, error) {
-	items := s.Near(view, x, y)
+// search returns the distance from v to the range of the colors that the CPU draws
+// for one pixel: with the derivatives of a GPU, and with the view moved around the
+// pixel. It stops when the range reaches v.
+func search(s *scene.Scene, frame []scene.Span, x, y int, v, first [4]uint8) (int, error) {
+	near := s.Near(frame, x, y)
 	lo, hi := first, first
 	worst := distance(v, lo, hi)
+	grow := func(c color.RGBA) {
+		for k, ch := range [4]uint8{c.R, c.G, c.B, c.A} {
+			lo[k], hi[k] = min(lo[k], ch), max(hi[k], ch)
+		}
+		worst = distance(v, lo, hi)
+	}
+	for _, fine := range []bool{false, true} {
+		c, err := s.QuadPixel(near, fine, x, y)
+		if err != nil {
+			return 0, err
+		}
+		if grow(c); worst <= Tolerance {
+			return worst, nil
+		}
+	}
 	for _, o := range [][2]float64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}} {
 		for n := noiseStep; n <= noise; n += noiseStep {
-			c, err := s.Pixel(items, view.Moved(o[0]*n, o[1]*n), x, y)
+			c, err := s.Pixel(near, o[0]*n, o[1]*n, x, y)
 			if err != nil {
 				return 0, err
 			}
-			for k, ch := range [4]uint8{c.R, c.G, c.B, c.A} {
-				lo[k], hi[k] = min(lo[k], ch), max(hi[k], ch)
-			}
-			if worst = distance(v, lo, hi); worst <= Tolerance {
+			if grow(c); worst <= Tolerance {
 				return worst, nil
 			}
 		}
@@ -122,7 +137,7 @@ func abs(v int) int {
 }
 
 // Capture draws s into a texture and reads the texture back.
-func Capture(device *wgpu.Device, s *scene.Scene, view scene.Projection, w, h int) (*image.RGBA, error) {
+func Capture(device *wgpu.Device, s *scene.Scene, frame []scene.Span, w, h int) (*image.RGBA, error) {
 	const format = wgpu.TextureFormatRGBA8Unorm
 	r, err := New(device, format, s)
 	if err != nil {
@@ -155,7 +170,7 @@ func Capture(device *wgpu.Device, s *scene.Scene, view scene.Projection, w, h in
 	}
 	defer staging.Release()
 
-	err = r.submit(target, r.pipeline, view, w, h, func(encoder *wgpu.CommandEncoder) error {
+	err = r.submit(target, r.pipeline, frame, w, h, func(encoder *wgpu.CommandEncoder) error {
 		return encoder.TryCopyTextureToBuffer(
 			&wgpu.TexelCopyTextureInfo{Texture: tex, Aspect: wgpu.TextureAspectAll},
 			&wgpu.TexelCopyBufferInfo{Buffer: staging, Layout: wgpu.TexelCopyBufferLayout{BytesPerRow: uint32(row), RowsPerImage: uint32(h)}},
