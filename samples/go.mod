@@ -9,7 +9,10 @@ require (
 	golang.org/x/image v0.43.0
 )
 
+require github.com/go-text/typesetting v0.3.5 // indirect
+
 require (
+	github.com/dhannyell/go-slug/text v0.0.0
 	github.com/dhannyell/webgpu/libs-android v0.0.0-20260905020343-c4069cac051c // indirect
 	github.com/dhannyell/webgpu/libs-darwin v0.0.0-20260905020352-092624e3a385 // indirect
 	github.com/dhannyell/webgpu/libs-ios v0.0.0-20260905020358-fb13dc722108 // indirect
@@ -19,3 +22,5 @@ require (
 )
 
 replace github.com/dhannyell/go-slug => ../
+
+replace github.com/dhannyell/go-slug/text => ../text
