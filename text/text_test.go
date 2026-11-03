@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/go-text/typesetting-utils/opentype"
-	"golang.org/x/image/font/sfnt"
 
 	slug "github.com/dhannyell/go-slug"
 )
@@ -51,7 +50,7 @@ func TestLigatureHasAnOutline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if line.Glyphs[0].ID != uint32(x) {
+	if line.Glyphs[0].ID != x {
 		t.Errorf("x has ID %d in the shaper and %d in the outline reader", line.Glyphs[0].ID, x)
 	}
 
@@ -63,7 +62,7 @@ func TestLigatureHasAnOutline(t *testing.T) {
 	if e.Key != (slug.Key{Source: 7, ID: line.Glyphs[1].ID}) || e.LayerCount != 1 {
 		t.Errorf("got entry %+v", e)
 	}
-	if _, err := f.outlines.Glyph(sfnt.GlyphIndex(line.Glyphs[1].ID)); err != nil {
+	if _, err := f.outlines.Glyph(line.Glyphs[1].ID); err != nil {
 		t.Error(err)
 	}
 }

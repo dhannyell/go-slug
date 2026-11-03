@@ -69,6 +69,17 @@ func TestGlyphSpace(t *testing.T) {
 	}
 }
 
+// A conversion to the 16 bits of a font must not select another glyph.
+func TestGlyphRejectsLargeID(t *testing.T) {
+	f, err := Parse(goregular.TTF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Glyph(1 << 16); err == nil {
+		t.Error("glyph 65536 has no error")
+	}
+}
+
 // Real outlines must satisfy the Path contract and fit in a Pack.
 func TestGlyphsEnterPack(t *testing.T) {
 	var p slug.Pack
