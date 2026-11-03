@@ -20,8 +20,9 @@ import (
 var debugWGSL string
 
 const (
-	paramsSize   = 80 // mat4x4f, vec2f, and the padding of the uniform struct
-	instanceSize = 44 // the attributes of SlugInstance
+	paramsSize   = 80  // mat4x4f, vec2f, and the padding of the uniform struct
+	paramsAlign  = 256 // the largest alignment of a dynamic offset that WebGPU allows
+	instanceSize = 44  // the attributes of SlugInstance
 )
 
 // Mode selects what Present shows.
@@ -49,7 +50,7 @@ type Renderer struct {
 	params    *wgpu.Buffer
 	instances *wgpu.Buffer
 	bindGroup *wgpu.BindGroup
-	count     uint32 // of instances
+	layers    []uint32 // the first instance of each item, and then the count
 	buffers   []*wgpu.Buffer
 	compare   *comparison
 }
@@ -81,16 +82,19 @@ func New(device *wgpu.Device, format wgpu.TextureFormat, s *scene.Scene) (*Rende
 		return nil, err
 	}
 
+	count := uint32(0)
 	for _, it := range s.Items {
-		r.count += it.Entry.LayerCount
+		r.layers = append(r.layers, count)
+		count += it.Entry.LayerCount
 	}
-	if r.params, err = r.buffer("params", wgpu.BufferUsageUniform, paramsSize); err != nil {
+	r.layers = append(r.layers, count)
+	if r.params, err = r.buffer("params", wgpu.BufferUsageUniform, scene.MaxSpans*paramsAlign); err != nil {
 		return nil, err
 	}
-	if r.instances, err = r.buffer("instances", wgpu.BufferUsageVertex, uint64(r.count)*instanceSize); err != nil {
+	if r.instances, err = r.buffer("instances", wgpu.BufferUsageVertex, uint64(count)*instanceSize); err != nil {
 		return nil, err
 	}
-	data := make([]byte, 0, int(r.count)*instanceSize)
+	data := make([]byte, 0, int(count)*instanceSize)
 	for _, it := range s.Items {
 		m := it.Place
 		for i := range it.Entry.LayerCount {
@@ -139,7 +143,7 @@ func (r *Renderer) layout() (layouts, error) {
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
 				Binding: 0, Visibility: wgpu.ShaderStageVertex,
-				Buffer: wgpu.BufferBindingLayout{Type: wgpu.BufferBindingTypeUniform, MinBindingSize: paramsSize},
+				Buffer: wgpu.BufferBindingLayout{Type: wgpu.BufferBindingTypeUniform, HasDynamicOffset: true, MinBindingSize: paramsSize},
 			},
 			storage(1), storage(2), storage(3),
 		},
@@ -229,32 +233,43 @@ func (r *Renderer) Release() {
 	}
 }
 
-// upload writes the parameters for a target of w by h pixels. The shader maps
-// world space to clip space with one matrix, and here world space is the design.
-func (r *Renderer) upload(view scene.Projection, w, h int) error {
+// upload writes the parameters of each span for a target of w by h pixels. The
+// shader maps world space to clip space with one matrix, and here world space is
+// the plane of the span.
+func (r *Renderer) upload(frame []scene.Span, w, h int) error {
+	if len(frame) > scene.MaxSpans {
+		return fmt.Errorf("render: %d spans, the limit is %d", len(frame), scene.MaxSpans)
+	}
+	if len(frame) == 0 {
+		return nil
+	}
 	fw, fh := float32(w), float32(h)
 	sx, sy := 2/float64(w), -2/float64(h)
-	// Clip x is 2x/w - 1, and clip y is 1 - 2y/h, both before the division by w.
-	clipX := [3]float64{sx*view[0] - view[6], sx*view[1] - view[7], sx*view[2] - view[8]}
-	clipY := [3]float64{sy*view[3] + view[6], sy*view[4] + view[7], sy*view[5] + view[8]}
-	// The columns of a mat4x4f. The design has z = 0.
-	params := floats(make([]byte, 0, paramsSize),
-		float32(clipX[0]), float32(clipY[0]), 0, float32(view[6]),
-		float32(clipX[1]), float32(clipY[1]), 0, float32(view[7]),
-		0, 0, 1, 0,
-		float32(clipX[2]), float32(clipY[2]), 0, float32(view[8]),
-		fw, fh, 0, 0,
-	)
+	params := make([]byte, len(frame)*paramsAlign)
+	for i, span := range frame {
+		view := span.View
+		// Clip x is 2x/w - 1, and clip y is 1 - 2y/h, both before the division by w.
+		clipX := [3]float64{sx*view[0] - view[6], sx*view[1] - view[7], sx*view[2] - view[8]}
+		clipY := [3]float64{sy*view[3] + view[6], sy*view[4] + view[7], sy*view[5] + view[8]}
+		// The columns of a mat4x4f. The plane has z = 0.
+		floats(params[i*paramsAlign:i*paramsAlign],
+			float32(clipX[0]), float32(clipY[0]), 0, float32(view[6]),
+			float32(clipX[1]), float32(clipY[1]), 0, float32(view[7]),
+			0, 0, 1, 0,
+			float32(clipX[2]), float32(clipY[2]), 0, float32(view[8]),
+			fw, fh, 0, 0,
+		)
+	}
 	if err := r.queue.TryWriteBuffer(r.params, 0, params); err != nil {
 		return fmt.Errorf("render: upload params: %w", err)
 	}
 	return nil
 }
 
-// submit clears target and draws the scene through view. after records more
+// submit clears target and draws one frame of the scene. after records more
 // commands in the same encoder.
-func (r *Renderer) submit(target *wgpu.TextureView, pipeline *wgpu.RenderPipeline, view scene.Projection, w, h int, after func(*wgpu.CommandEncoder) error) error {
-	if err := r.upload(view, w, h); err != nil {
+func (r *Renderer) submit(target *wgpu.TextureView, pipeline *wgpu.RenderPipeline, frame []scene.Span, w, h int, after func(*wgpu.CommandEncoder) error) error {
+	if err := r.upload(frame, w, h); err != nil {
 		return err
 	}
 	encoder, err := r.device.TryCreateCommandEncoder(&wgpu.CommandEncoderDescriptor{Label: "slug"})
@@ -275,9 +290,16 @@ func (r *Renderer) submit(target *wgpu.TextureView, pipeline *wgpu.RenderPipelin
 		return fmt.Errorf("render: begin pass: %w", err)
 	}
 	pass.SetPipeline(pipeline)
-	pass.SetBindGroup(0, r.bindGroup, nil)
-	pass.SetVertexBuffer(0, r.instances, 0, uint64(r.count)*instanceSize)
-	pass.Draw(6, r.count, 0, 0)
+	pass.SetVertexBuffer(0, r.instances, 0, uint64(r.layers[len(r.layers)-1])*instanceSize)
+	for i, span := range frame {
+		first := r.layers[span.First]
+		count := r.layers[span.First+span.Count] - first
+		if count == 0 {
+			continue
+		}
+		pass.SetBindGroup(0, r.bindGroup, []uint32{uint32(i) * paramsAlign})
+		pass.Draw(6, count, 0, first)
+	}
 	pass.End()
 	pass.Release()
 
@@ -320,9 +342,9 @@ func (r *Renderer) Present(surface *wgpu.Surface, t float64, w, h int) error {
 	case Compare:
 		err = r.presentCompare(target, t, w, h)
 	case Debug:
-		err = r.submit(target, r.debug, r.scene.View(t, w, h), w, h, nil)
+		err = r.submit(target, r.debug, r.scene.Frame(t, w, h), w, h, nil)
 	default:
-		err = r.submit(target, r.pipeline, r.scene.View(t, w, h), w, h, nil)
+		err = r.submit(target, r.pipeline, r.scene.Frame(t, w, h), w, h, nil)
 	}
 	if err != nil {
 		return err

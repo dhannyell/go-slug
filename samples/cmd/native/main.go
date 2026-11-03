@@ -1,7 +1,7 @@
 //go:build cgo
 
 // Command native draws the scenes in a desktop window, with wgpu-native and GLFW.
-// The keys 1 to 4 select a scene, D shows the debug view, and C shows the
+// The number keys select a scene, D shows the debug view, and C shows the
 // comparison of the GPU with the CPU.
 package main
 
