@@ -65,6 +65,7 @@ func (f *Font) Glyph(i sfnt.GlyphIndex) (Glyph, error) {
 	}
 
 	g := Glyph{
+		Drawing: slug.Drawing{Em: float32(f.UnitsPerEm())},
 		Advance: float32(adv),
 		// sfnt is Y-down: flip, so the old Max.Y becomes the new Min.Y.
 		Bounds: slug.Rect{
