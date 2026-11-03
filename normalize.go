@@ -11,7 +11,7 @@ var ErrInvalidPath = errors.New("slug: invalid path")
 
 // shape is one layer after normalization: quadratics in final space.
 type shape struct {
-	Curves []Curve
+	Curves []curve
 	Bounds Rect
 	Rule   FillRule
 	Paint  Paint
@@ -53,7 +53,7 @@ func normalize(d Drawing, tol float32) ([]shape, error) {
 
 // flattenPath checks p against the Path contract and appends its curves to
 // dst. It does not change p.
-func flattenPath(p Path, m Affine, tol float32, dst []Curve) ([]Curve, error) {
+func flattenPath(p Path, m Affine, tol float32, dst []curve) ([]curve, error) {
 	var (
 		i          int
 		start, cur Point
@@ -98,7 +98,7 @@ func flattenPath(p Path, m Affine, tol float32, dst []Curve) ([]Curve, error) {
 			}
 			cur = pts[0]
 		case QuadTo:
-			if c := (Curve{cur, pts[0], pts[1]}); !degenerate(c) {
+			if c := (curve{cur, pts[0], pts[1]}); !degenerate(c) {
 				dst = append(dst, c)
 			}
 			cur = pts[1]
@@ -121,7 +121,7 @@ func flattenPath(p Path, m Affine, tol float32, dst []Curve) ([]Curve, error) {
 // cubicToQuads appends quadratics that stay within tol of the cubic.
 // It makes at most maxCubicSplits quadratics, so a very small tol can give a
 // larger error.
-func cubicToQuads(p0, p1, p2, p3 Point, tol float32, dst []Curve) []Curve {
+func cubicToQuads(p0, p1, p2, p3 Point, tol float32, dst []curve) []curve {
 	d := sub(add(p3, scale(p1, 3)), add(scale(p2, 3), p0))
 	r := math.Ceil(math.Cbrt(float64(cubicErr * length(d) / tol)))
 	n := maxCubicSplits
@@ -139,9 +139,9 @@ func cubicToQuads(p0, p1, p2, p3 Point, tol float32, dst []Curve) []Curve {
 }
 
 // appendQuad appends the quadratic that matches the cubic c at both ends.
-func appendQuad(dst []Curve, c [4]Point) []Curve {
+func appendQuad(dst []curve, c [4]Point) []curve {
 	ctrl := scale(sub(scale(add(c[1], c[2]), 3), add(c[0], c[3])), 0.25)
-	q := Curve{c[0], ctrl, c[3]}
+	q := curve{c[0], ctrl, c[3]}
 	if degenerate(q) {
 		return dst
 	}
@@ -157,19 +157,19 @@ func splitCubic(c [4]Point, t float32) (left, right [4]Point) {
 }
 
 // boundsOf returns the union of the bounds of curves; false when empty.
-func boundsOf(curves []Curve) (Rect, bool) {
+func boundsOf(curves []curve) (Rect, bool) {
 	if len(curves) == 0 {
 		return Rect{}, false
 	}
-	r := curves[0].Bounds()
+	r := curves[0].bounds()
 	for _, c := range curves[1:] {
-		r = union(r, c.Bounds())
+		r = union(r, c.bounds())
 	}
 	return r, true
 }
 
 // degenerate reports a curve that is a single point.
-func degenerate(c Curve) bool {
+func degenerate(c curve) bool {
 	return c.P0 == c.P1 && c.P1 == c.P2
 }
 

@@ -10,13 +10,13 @@ import (
 func TestBandsCoverEveryCurve(t *testing.T) {
 	// A ring of quadratics: many curves, each on a small part of the box.
 	const count = 24
-	var curves []Curve
+	var curves []curve
 	at := func(i float64, r float64) Point {
 		a := i * 2 * math.Pi / count
 		return Point{float32(r * math.Cos(a)), float32(r * math.Sin(a))}
 	}
 	for i := range count {
-		curves = append(curves, Curve{at(float64(i), 100), at(float64(i)+0.5, 103), at(float64(i)+1, 100)})
+		curves = append(curves, curve{at(float64(i), 100), at(float64(i)+0.5, 103), at(float64(i)+1, 100)})
 	}
 	bounds, _ := boundsOf(curves)
 	bs := buildBands(curves, bounds, 0)
@@ -30,7 +30,7 @@ func TestBandsCoverEveryCurve(t *testing.T) {
 			v := lo + (hi-lo)*float32(i)/1000
 			got := bands[bandIndex(v, lo, hi, len(bands))]
 			for ci, c := range curves {
-				eLo, eHi := extent(c.Bounds())
+				eLo, eHi := extent(c.bounds())
 				if eLo <= v && v <= eHi && !slices.Contains(got, uint32(ci)) {
 					t.Errorf("%s: curve %d spans %v but is not in its band", name, ci, v)
 				}
@@ -42,7 +42,7 @@ func TestBandsCoverEveryCurve(t *testing.T) {
 }
 
 func TestBandsLeaveOutFlatCurves(t *testing.T) {
-	curves := []Curve{
+	curves := []curve{
 		lineCurve(Point{0, 0}, Point{4, 0}), // horizontal
 		lineCurve(Point{4, 0}, Point{4, 3}), // vertical
 		lineCurve(Point{4, 3}, Point{0, 0}), // diagonal
@@ -60,7 +60,7 @@ func TestBandsLeaveOutFlatCurves(t *testing.T) {
 
 func TestBandOrderIsDescendingAndStable(t *testing.T) {
 	// All curves span the full height, so every n ties and H has one band.
-	curves := []Curve{
+	curves := []curve{
 		lineCurve(Point{1, 0}, Point{1, 4}),
 		lineCurve(Point{3, 0}, Point{3, 4}),
 		lineCurve(Point{3, 4}, Point{3, 0}), // same key as curve 1
@@ -77,7 +77,7 @@ func TestBandOrderIsDescendingAndStable(t *testing.T) {
 // The shader stops at the first curve behind the pixel, so the key must be the
 // maximum of all three points. A lower key hides a curve: a hole on the screen.
 func TestBandKeyUsesAllControlPoints(t *testing.T) {
-	curves := []Curve{
+	curves := []curve{
 		{Point{0, 0}, Point{0, 2}, Point{7, 4}}, // P2 has the max
 		{Point{8, 0}, Point{0, 2}, Point{0, 4}}, // P0 has the max
 		{Point{0, 0}, Point{9, 2}, Point{0, 4}}, // P1 has the max
@@ -89,9 +89,9 @@ func TestBandKeyUsesAllControlPoints(t *testing.T) {
 		t.Errorf("H = %v, want one band %v", bs.H, want)
 	}
 
-	swapped := make([]Curve, len(curves))
+	swapped := make([]curve, len(curves))
 	for i, c := range curves {
-		swapped[i] = Curve{Point{c.P0.Y, c.P0.X}, Point{c.P1.Y, c.P1.X}, Point{c.P2.Y, c.P2.X}}
+		swapped[i] = curve{Point{c.P0.Y, c.P0.X}, Point{c.P1.Y, c.P1.X}, Point{c.P2.Y, c.P2.X}}
 	}
 	bs = buildBands(swapped, Rect{Point{0, 0}, Point{4, 9}}, 0)
 	if len(bs.V) != 1 || !slices.Equal(bs.V[0], want) {
@@ -127,7 +127,7 @@ func TestBandRangeOverlap(t *testing.T) {
 }
 
 func TestBandsOfFlatShape(t *testing.T) {
-	curves := []Curve{lineCurve(Point{0, 2}, Point{4, 2})}
+	curves := []curve{lineCurve(Point{0, 2}, Point{4, 2})}
 	bs := buildBands(curves, Rect{Point{0, 2}, Point{4, 2}}, 0.01)
 
 	if len(bs.H) != 1 || len(bs.H[0]) != 0 {

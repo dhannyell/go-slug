@@ -5,15 +5,15 @@ import "testing"
 func TestCurveBounds(t *testing.T) {
 	cases := []struct {
 		name string
-		c    Curve
+		c    curve
 		want Rect
 	}{
-		{"peak inside", Curve{Point{0, 4}, Point{1, 6}, Point{2, 4}}, Rect{Point{0, 4}, Point{2, 5}}},
+		{"peak inside", curve{Point{0, 4}, Point{1, 6}, Point{2, 4}}, Rect{Point{0, 4}, Point{2, 5}}},
 		{"line, zero denominator", lineCurve(Point{0, 0}, Point{3, 3}), Rect{Point{0, 0}, Point{3, 3}}},
-		{"extremum outside (0,1)", Curve{Point{0, 0}, Point{1, 1}, Point{3, 3}}, Rect{Point{0, 0}, Point{3, 3}}},
+		{"extremum outside (0,1)", curve{Point{0, 0}, Point{1, 1}, Point{3, 3}}, Rect{Point{0, 0}, Point{3, 3}}},
 	}
 	for _, c := range cases {
-		if got := c.c.Bounds(); got != c.want {
+		if got := c.c.bounds(); got != c.want {
 			t.Errorf("%s: Bounds() = %v, want %v", c.name, got, c.want)
 		}
 	}

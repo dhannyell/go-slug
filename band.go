@@ -27,7 +27,7 @@ type span struct {
 
 // buildBands makes the bands of curves. A curve also enters every band
 // within overlap of its extent.
-func buildBands(curves []Curve, bounds Rect, overlap float32) bandSet {
+func buildBands(curves []curve, bounds Rect, overlap float32) bandSet {
 	h, v := axisSpans(curves)
 	return bandSet{
 		H: fillBands(h, bounds.Min.Y, bounds.Max.Y, overlap),
@@ -37,9 +37,9 @@ func buildBands(curves []Curve, bounds Rect, overlap float32) bandSet {
 
 // axisSpans returns the spans for horizontal and vertical bands. A curve that
 // is flat on an axis has no span there: a ray parallel to it never crosses it.
-func axisSpans(curves []Curve) (h, v []span) {
+func axisSpans(curves []curve) (h, v []span) {
 	for i, c := range curves {
-		b := c.Bounds()
+		b := c.bounds()
 		if b.Min.Y != b.Max.Y {
 			h = append(h, span{b.Min.Y, b.Max.Y, max(c.P0.X, c.P1.X, c.P2.X), uint32(i)})
 		}

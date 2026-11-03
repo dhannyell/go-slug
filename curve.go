@@ -1,17 +1,17 @@
 package slug
 
-// Curve is a quadratic Bézier: P0 start, P1 control, P2 end.
-type Curve struct {
+// curve is a quadratic Bézier: P0 start, P1 control, P2 end.
+type curve struct {
 	P0, P1, P2 Point
 }
 
 // lineCurve returns a straight line as a quadratic: {a, b, b}.
-func lineCurve(a, b Point) Curve {
-	return Curve{a, b, b}
+func lineCurve(a, b Point) curve {
+	return curve{a, b, b}
 }
 
-// Bounds returns the exact box of c.
-func (c Curve) Bounds() Rect {
+// bounds returns the exact box of c.
+func (c curve) bounds() Rect {
 	loX, hiX := extent(c.P0.X, c.P1.X, c.P2.X)
 	loY, hiY := extent(c.P0.Y, c.P1.Y, c.P2.Y)
 

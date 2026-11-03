@@ -23,7 +23,6 @@ import (
 	gofont "github.com/go-text/typesetting/font"
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
-	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 
 	slug "github.com/dhannyell/go-slug"
@@ -82,8 +81,10 @@ type Line struct {
 	Width  float32 // in em
 }
 
-// ResolveFace implements shaping.Fontmap: all runes use the one face.
-func (f *Font) ResolveFace(rune) *gofont.Face { return f.face }
+// oneFace implements shaping.Fontmap: all runes use the one face.
+type oneFace struct{ face *gofont.Face }
+
+func (o oneFace) ResolveFace(rune) *gofont.Face { return o.face }
 
 // Shape returns the lines of s. A newline in s starts a new paragraph, and the
 // base direction applies to each paragraph.
@@ -113,7 +114,7 @@ func (f *Font) shapeParagraph(runes []rune, offset int, o Options) []Line {
 		Size: fixed.I(shapeSize), Language: language.NewLanguage(o.Language),
 	}
 	var runs []shaping.Output
-	for _, part := range f.segments.Split(input, f) {
+	for _, part := range f.segments.Split(input, oneFace{f.face}) {
 		runs = append(runs, f.shaper.Shape(part))
 	}
 
@@ -162,7 +163,7 @@ func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
 	if e, ok := p.Lookup(key); ok {
 		return e, nil
 	}
-	outline, err := f.outlines.Glyph(sfnt.GlyphIndex(g.ID))
+	outline, err := f.outlines.Glyph(g.ID)
 	if err != nil {
 		return slug.Entry{}, fmt.Errorf("text: %w", err)
 	}

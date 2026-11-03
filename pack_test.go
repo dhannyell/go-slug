@@ -85,7 +85,7 @@ func viewLayer(p *Pack, i uint32) layerView {
 func (v layerView) float(i int) float32 { return math.Float32frombits(v.rec[i]) }
 
 // bandCurves walks one band: header, list, then curve texels.
-func (v layerView) bandCurves(vertical bool, coord float32) []Curve {
+func (v layerView) bandCurves(vertical bool, coord float32) []curve {
 	nH, nV := int(v.rec[1]&0xFFFF), int(v.rec[1]>>16)
 	var idx int
 	if vertical {
@@ -96,15 +96,15 @@ func (v layerView) bandCurves(vertical bool, coord float32) []Curve {
 	base := v.rec[0]
 	count, offset := v.p.Bands()[base+uint32(2*idx)], v.p.Bands()[base+uint32(2*idx)+1]
 
-	var out []Curve
+	var out []curve
 	for _, loc := range v.p.Bands()[base+offset:][:count] {
 		c := v.p.Curves()[loc*4:][:8]
-		out = append(out, Curve{Point{c[0], c[1]}, Point{c[2], c[3]}, Point{c[4], c[5]}})
+		out = append(out, curve{Point{c[0], c[1]}, Point{c[2], c[3]}, Point{c[4], c[5]}})
 	}
 	return out
 }
 
-func bandKey(c Curve, vertical bool) float32 {
+func bandKey(c curve, vertical bool) float32 {
 	if vertical {
 		return max(c.P0.Y, c.P1.Y, c.P2.Y)
 	}
@@ -149,7 +149,7 @@ func TestPackDataMatchesShaderWalk(t *testing.T) {
 				list := v.bandCurves(vertical, coord)
 
 				for _, c := range s.Curves {
-					b := c.Bounds()
+					b := c.bounds()
 					eLo, eHi := b.Min.Y, b.Max.Y
 					if vertical {
 						eLo, eHi = b.Min.X, b.Max.X
@@ -181,7 +181,7 @@ func TestPackBandOverlap(t *testing.T) {
 	s := emShapes(t, d)[0]
 
 	for _, c := range s.Curves {
-		b := c.Bounds()
+		b := c.bounds()
 		for _, coord := range []float32{b.Min.Y - overlap/2, b.Max.Y + overlap/2} {
 			if b.Min.Y < b.Max.Y && !slices.Contains(v.bandCurves(false, coord), c) {
 				t.Errorf("Y %v: curve %v is not in the band", coord, c)

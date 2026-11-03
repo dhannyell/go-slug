@@ -45,10 +45,14 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 
 ## Install
 
-The library needs Go 1.25 or later.
+The library needs Go 1.22 or later. The [`text`](text) module needs Go 1.24 or later.
 
 ```bash
 go get github.com/dhannyell/go-slug
+```
+
+```bash
+go get github.com/dhannyell/go-slug/text
 ```
 
 ## Quick start
@@ -92,7 +96,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		entry, err := pack.Add(slug.Key{ID: uint32(id)}, g.Drawing)
+		entry, err := pack.Add(slug.Key{ID: id}, g.Drawing)
 		if err != nil {
 			log.Fatal(err)
 		}

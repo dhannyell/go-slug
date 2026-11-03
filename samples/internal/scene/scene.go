@@ -229,7 +229,7 @@ func (s *Scene) text(f *font.Font, text string, size float32, line slug.Affine, 
 			return fmt.Errorf("scene: rune %q: %w", r, err)
 		}
 		place := slug.Affine{size, 0, 0, -size, pen, 0}.Then(line)
-		if err := s.add(slug.Key{Source: sourceFont, ID: uint32(i)}, g.Drawing, place, c); err != nil {
+		if err := s.add(slug.Key{Source: sourceFont, ID: i}, g.Drawing, place, c); err != nil {
 			return err
 		}
 		pen += g.Advance / g.Drawing.Em * size

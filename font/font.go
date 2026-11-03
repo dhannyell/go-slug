@@ -4,6 +4,7 @@ package font
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/dhannyell/go-slug"
 	xfont "golang.org/x/image/font"
@@ -49,12 +50,17 @@ func (f *Font) UnitsPerEm() int {
 
 // GlyphIndex returns the glyph for r. It returns 0 (the missing glyph) when
 // the font has no glyph for r.
-func (f *Font) GlyphIndex(r rune) (sfnt.GlyphIndex, error) {
-	return f.sf.GlyphIndex(&f.buf, r)
+func (f *Font) GlyphIndex(r rune) (uint32, error) {
+	i, err := f.sf.GlyphIndex(&f.buf, r)
+	return uint32(i), err
 }
 
-// Glyph returns the outline and metrics of glyph i.
-func (f *Font) Glyph(i sfnt.GlyphIndex) (Glyph, error) {
+// Glyph returns the outline and metrics of glyph id.
+func (f *Font) Glyph(id uint32) (Glyph, error) {
+	if id > math.MaxUint16 {
+		return Glyph{}, fmt.Errorf("font: glyph %d is out of range", id)
+	}
+	i := sfnt.GlyphIndex(id)
 	segs, err := f.sf.LoadGlyph(&f.buf, i, f.ppem, nil)
 	if err != nil {
 		return Glyph{}, fmt.Errorf("font: glyph %d: %w", i, err)
