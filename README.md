@@ -14,9 +14,6 @@ angle, without a texture atlas.
 **[Run this demo in your browser](https://dhannyell.github.io/go-slug/?scene=news&mode=versus-sdf)**:
 a drag turns the newspaper, and the wheel zooms. The demo needs a browser with WebGPU.
 
-> [!NOTE]
-> The API can change before v1.0.0.
-
 ## Contents
 
 - [Features](#features)
