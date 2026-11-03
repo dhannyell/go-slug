@@ -6,6 +6,40 @@ it produces data buffers and WGSL shader code that any WebGPU host can use.
 
 > Status: early development. The API is not stable.
 
+## Shaders
+
+`slug.ReferenceWGSL` is a complete shader over three storage buffers: the three
+arrays of a `Pack`, which [FORMAT.md](FORMAT.md) describes. `slug.CoreWGSL` holds
+only the functions, for a shader of your own. It calls `slug_curve`, `slug_band`
+and `slug_layer`, which you declare.
+
+`Pack.Rasterize` is the CPU copy of the shader, and its oracle. The test in
+[samples/internal/render](samples/internal/render) compares the two.
+
+## Samples
+
+[samples](samples) is a separate module, so the library has no GPU dependency.
+These commands run in the `samples` directory.
+
+Draw the scene in a window:
+
+```bash
+go run ./cmd/native
+```
+
+Build the browser host:
+
+```bash
+GOOS=js GOARCH=wasm go build -o web/app.wasm ./cmd/web && cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
+```
+
+Serve it at `http://localhost:8092`. The address `/?check` shows the comparison
+of the GPU with the CPU.
+
+```bash
+go run ./cmd/serve
+```
+
 ## Credits
 
 The rendering algorithm is Slug, by Eric Lengyel:

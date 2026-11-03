@@ -1,1 +1,3 @@
 .idea/
+samples/web/app.wasm
+samples/web/wasm_exec.js

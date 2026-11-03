@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  shaders:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: samples/go.mod
+      # Lavapipe is a Vulkan driver on the CPU. wgpu compiles the WGSL for it,
+      # so this job also validates the shaders.
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: Compare the shader with the CPU evaluator
+        working-directory: samples
+        run: go test -v ./internal/...
+      - name: Build the browser host
+        working-directory: samples
+        env:
+          CGO_ENABLED: "0"
+          GOOS: js
+          GOARCH: wasm
+        run: go build -o /dev/null ./cmd/web

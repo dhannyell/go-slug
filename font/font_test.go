@@ -1,6 +1,7 @@
 package font
 
 import (
+	"image"
 	"testing"
 
 	slug "github.com/dhannyell/go-slug"
@@ -22,6 +23,41 @@ func TestGlyphO(t *testing.T) {
 	areas := contourAreas(g.Drawing.Layers[0].Path)
 	if len(areas) != 2 || areas[0]*areas[1] >= 0 {
 		t.Errorf("contour areas = %v, want two with opposite signs", areas)
+	}
+}
+
+// A real glyph must render: the middle row crosses the two sides of the 'o', and
+// the center is the hole.
+func TestGlyphORenders(t *testing.T) {
+	g := glyph(t, 'o')
+	var p slug.Pack
+	e, err := p.Add(slug.Key{ID: 'o'}, g.Drawing)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const pixels = 64 // size of the em
+	b := e.Bounds
+	view := slug.Affine{pixels, 0, 0, -pixels, -b.Min.X * pixels, b.Max.Y * pixels}
+	dst := image.NewAlpha(image.Rect(0, 0, int((b.Max.X-b.Min.X)*pixels)+1, int((b.Max.Y-b.Min.Y)*pixels)+1))
+	if err := p.Coverage(e.FirstLayer, view, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	size, row := dst.Bounds().Size(), dst.Bounds().Dy()/2
+	runs, full := 0, false
+	for x := range size.X {
+		v := dst.AlphaAt(x, row).A
+		if v >= 128 && (x == 0 || dst.AlphaAt(x-1, row).A < 128) {
+			runs++
+		}
+		full = full || v == 255
+	}
+	if runs != 2 || !full {
+		t.Errorf("middle row: %d filled runs, full pixel %v; want 2 runs with a full pixel", runs, full)
+	}
+	if got := dst.AlphaAt(size.X/2, row).A; got != 0 {
+		t.Errorf("center: coverage %d, want 0", got)
 	}
 }
 
