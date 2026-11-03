@@ -33,6 +33,21 @@ func TestGlyphSpace(t *testing.T) {
 	}
 }
 
+// Real outlines must satisfy the Path contract and fit in a Pack.
+func TestGlyphsEnterPack(t *testing.T) {
+	var p slug.Pack
+	for r := rune(' '); r <= '~'; r++ {
+		g := glyph(t, r)
+		e, err := p.Add(slug.Key{ID: uint32(r)}, g.Drawing)
+		if err != nil {
+			t.Fatalf("Add(%q): %v", r, err)
+		}
+		if want := uint32(len(g.Drawing.Layers)); e.LayerCount != want {
+			t.Errorf("Add(%q): LayerCount = %d, want %d", r, e.LayerCount, want)
+		}
+	}
+}
+
 func glyph(t *testing.T, r rune) Glyph {
 	t.Helper()
 	f, err := Parse(goregular.TTF)

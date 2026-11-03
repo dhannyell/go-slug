@@ -133,4 +133,7 @@ type Layer struct {
 // Layers draw in order; later layers go on top.
 type Drawing struct {
 	Layers []Layer
+	// Em is the design size in drawing units: units per em for a glyph, the
+	// viewBox size for an icon. Pack.Add divides coordinates by it.
+	Em float32
 }

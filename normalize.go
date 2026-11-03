@@ -25,12 +25,8 @@ const maxCubicSplits = 64
 
 // normalize converts every layer of d into quadratics.
 // tol is the maximum distance between a cubic and its quadratics,
-// in final units. Layers without curves make no shape.
+// in final units; it must be positive. Layers without curves make no shape.
 func normalize(d Drawing, tol float32) ([]shape, error) {
-	if !(tol > 0) {
-		return nil, fmt.Errorf("slug: tolerance %v is not positive", tol)
-	}
-
 	var shapes []shape
 	for li, layer := range d.Layers {
 		m := Identity()
