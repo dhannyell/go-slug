@@ -38,7 +38,7 @@ func TestNormalizeCloses(t *testing.T) {
 
 	a := mustNormalize(t, Drawing{Layers: []Layer{{Path: open}}})
 	b := mustNormalize(t, Drawing{Layers: []Layer{{Path: closed}}})
-	want := []Curve{
+	want := []curve{
 		lineCurve(Point{0, 0}, Point{4, 0}),
 		lineCurve(Point{4, 0}, Point{0, 3}),
 		lineCurve(Point{0, 3}, Point{0, 0}),
@@ -126,7 +126,7 @@ func mustNormalize(t *testing.T, d Drawing) []shape {
 	return s
 }
 
-func equalCurves(a, b []Curve) bool {
+func equalCurves(a, b []curve) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -150,7 +150,7 @@ func equalPoints(a, b []Point) bool {
 	return true
 }
 
-func quadAt(q Curve, t float32) Point {
+func quadAt(q curve, t float32) Point {
 	return lerp(lerp(q.P0, q.P1, t), lerp(q.P1, q.P2, t), t)
 }
 

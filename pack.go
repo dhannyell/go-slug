@@ -96,7 +96,7 @@ func (p *Pack) Add(key Key, d Drawing) (Entry, error) {
 // endpoints and flat curves stay valid.
 func toEm(s *shape, em float32) error {
 	for i, c := range s.Curves {
-		s.Curves[i] = Curve{
+		s.Curves[i] = curve{
 			Point{c.P0.X / em, c.P0.Y / em},
 			Point{c.P1.X / em, c.P1.Y / em},
 			Point{c.P2.X / em, c.P2.Y / em},
@@ -173,7 +173,7 @@ func (p *Pack) appendShape(s shape) {
 
 // appendCurves writes curves and returns the texel of each. A curve that starts
 // at the end of the previous curve shares its texel.
-func (p *Pack) appendCurves(curves []Curve) []uint32 {
+func (p *Pack) appendCurves(curves []curve) []uint32 {
 	locs := make([]uint32, len(curves))
 	for i, c := range curves {
 		if i > 0 && c.P0 == curves[i-1].P2 {
@@ -199,8 +199,8 @@ func (p *Pack) appendBands(set bandSet, locs []uint32) uint32 {
 			p.bands[header] = uint32(len(b))
 			p.bands[header+1] = uint32(len(p.bands) - start)
 			header += 2
-			for _, curve := range b {
-				p.bands = append(p.bands, locs[curve])
+			for _, i := range b {
+				p.bands = append(p.bands, locs[i])
 			}
 		}
 	}
