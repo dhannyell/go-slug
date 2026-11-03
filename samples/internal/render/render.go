@@ -35,11 +35,19 @@ const (
 	Debug
 	// Compare shows the GPU image, the CPU image, and their difference.
 	Compare
+	// VersusBitmap shows Slug next to a bitmap atlas, in a scene that allows it.
+	VersusBitmap
+	// VersusDistance shows Slug next to a signed distance field, in a scene that
+	// allows it.
+	VersusDistance
 )
 
 // Renderer holds the GPU copy of one scene.
 type Renderer struct {
 	Mode Mode
+	// Budget is the size of an atlas, as a multiple of the size of the pack. Zero
+	// selects the default of the method. The first use of a versus mode reads it.
+	Budget int
 
 	device    *wgpu.Device
 	queue     *wgpu.Queue
@@ -53,6 +61,7 @@ type Renderer struct {
 	layers    []uint32 // the first instance of each item, and then the count
 	buffers   []*wgpu.Buffer
 	compare   *comparison
+	methods   map[Mode]*method
 }
 
 // New uploads s and builds the pipelines for targets of format.
@@ -225,6 +234,9 @@ func floats(b []byte, v ...float32) []byte {
 // Release frees the GPU objects of r.
 func (r *Renderer) Release() {
 	r.compare.release()
+	for _, m := range r.methods {
+		m.release()
+	}
 	r.bindGroup.Release()
 	r.pipeline.Release()
 	r.debug.Release()
@@ -266,9 +278,32 @@ func (r *Renderer) upload(frame []scene.Span, w, h int) error {
 	return nil
 }
 
-// submit clears target and draws one frame of the scene. after records more
-// commands in the same encoder.
+// submit clears target and draws one frame of the scene with Slug.
 func (r *Renderer) submit(target *wgpu.TextureView, pipeline *wgpu.RenderPipeline, frame []scene.Span, w, h int, after func(*wgpu.CommandEncoder) error) error {
+	return r.encode(target, frame, w, h, func(pass *wgpu.RenderPassEncoder, frame []scene.Span) {
+		r.drawSpans(pass, pipeline, frame, 0)
+	}, after)
+}
+
+// drawSpans draws a frame with Slug. base is the index of the parameters of the
+// first span.
+func (r *Renderer) drawSpans(pass *wgpu.RenderPassEncoder, pipeline *wgpu.RenderPipeline, frame []scene.Span, base int) {
+	pass.SetPipeline(pipeline)
+	pass.SetVertexBuffer(0, r.instances, 0, uint64(r.layers[len(r.layers)-1])*instanceSize)
+	for i, span := range frame {
+		first := r.layers[span.First]
+		count := r.layers[span.First+span.Count] - first
+		if count == 0 {
+			continue
+		}
+		pass.SetBindGroup(0, r.bindGroup, []uint32{uint32(base+i) * paramsAlign})
+		pass.Draw(6, count, 0, first)
+	}
+}
+
+// encode clears target, uploads the parameters of frame and calls draw in one pass.
+// after records more commands in the same encoder.
+func (r *Renderer) encode(target *wgpu.TextureView, frame []scene.Span, w, h int, draw func(*wgpu.RenderPassEncoder, []scene.Span), after func(*wgpu.CommandEncoder) error) error {
 	if err := r.upload(frame, w, h); err != nil {
 		return err
 	}
@@ -289,17 +324,7 @@ func (r *Renderer) submit(target *wgpu.TextureView, pipeline *wgpu.RenderPipelin
 	if err != nil {
 		return fmt.Errorf("render: begin pass: %w", err)
 	}
-	pass.SetPipeline(pipeline)
-	pass.SetVertexBuffer(0, r.instances, 0, uint64(r.layers[len(r.layers)-1])*instanceSize)
-	for i, span := range frame {
-		first := r.layers[span.First]
-		count := r.layers[span.First+span.Count] - first
-		if count == 0 {
-			continue
-		}
-		pass.SetBindGroup(0, r.bindGroup, []uint32{uint32(i) * paramsAlign})
-		pass.Draw(6, count, 0, first)
-	}
+	draw(pass, frame)
 	pass.End()
 	pass.Release()
 
@@ -316,6 +341,31 @@ func (r *Renderer) submit(target *wgpu.TextureView, pipeline *wgpu.RenderPipelin
 	r.queue.Submit(cmd)
 	return nil
 }
+
+// Drag turns a scene with an orbit, by a move of the pointer in pixels.
+func (r *Renderer) Drag(dx, dy float64) {
+	if r.scene.Orbit != nil {
+		r.scene.Orbit.Drag(dx, dy)
+	}
+}
+
+// Wheel zooms a scene with an orbit around the pointer at x, y, in a target of w by h
+// pixels. In a versus view, the pointer is in one of two equal images.
+func (r *Renderer) Wheel(steps, x, y float64, w, h int) {
+	if r.scene.Orbit == nil {
+		return
+	}
+	if (r.Mode == VersusBitmap || r.Mode == VersusDistance) && r.scene.Versus {
+		w = max(w/2, 1)
+		if x >= float64(w) {
+			x -= float64(w)
+		}
+	}
+	r.scene.Orbit.Wheel(steps, x, y, w, h)
+}
+
+// Orbited tells that the mouse controls the view of the scene.
+func (r *Renderer) Orbited() bool { return r.scene.Orbit != nil }
 
 // Present draws one frame at t seconds on the surface. It draws nothing when the
 // surface has no texture, for example during a resize.
@@ -338,7 +388,13 @@ func (r *Renderer) Present(surface *wgpu.Surface, t float64, w, h int) error {
 	}
 	defer target.Release()
 
-	switch r.Mode {
+	mode := r.Mode
+	if (mode == VersusBitmap || mode == VersusDistance) && !r.scene.Versus {
+		mode = Normal
+	}
+	switch mode {
+	case VersusBitmap, VersusDistance:
+		err = r.presentVersus(target, t, w, h)
 	case Compare:
 		err = r.presentCompare(target, t, w, h)
 	case Debug:

@@ -32,6 +32,38 @@ var (
 	blue       = [4]float32{0.13, 0.36, 0.62, 1}
 )
 
+// cubeText is the text of each face of the cube, under its word.
+var cubeText = []struct {
+	size  float32
+	lines []string
+}{
+	{14, []string{
+		"The GPU reads the outline in each pixel,",
+		"so a letter has the same shape at each",
+		"scale and at each angle of the cube.",
+	}},
+	{11, []string{
+		"A texture holds samples of a letter. When the letter",
+		"is small, a thin stroke falls between the samples, and",
+		"the letter changes its shape or loses a part of it.",
+		"Read these lines while the cube turns, on each side.",
+	}},
+	{8, []string{
+		"Slug stores the curves of each glyph. The bands of a glyph tell the",
+		"shader which curves can touch a pixel, so the shader reads only a",
+		"few curves. The shader computes the part of the pixel inside the",
+		"outline from these curves, and it needs no texture of the letter.",
+		"An atlas stores the image of each glyph before the first frame, at",
+		"one size. A distance field stores the distance to the outline at",
+		"each texel. A stroke thinner than two texels can leave no texel",
+		"inside it. Mipmap levels average these values, and the stroke can",
+		"go. Far from the camera, that is where the letters break first.",
+		"Each face of this cube is one plane with one matrix, and all of",
+		"its text turns with it. There is no depth buffer: the faces draw",
+		"from the back to the front, and a back face does not draw.",
+	}},
+}
+
 // flat is a part of the hall that one matrix draws. Its items use plane
 // coordinates, from the corner at origin: x along u and y along v, with y down
 // when the plane is a wall. A front face has u x v toward the camera.
@@ -129,25 +161,21 @@ func (s *Scene) hall() error {
 			return cubeCenter.add(turn(vec3{-cubeHalf, cubeHalf, -cubeHalf})), turn(vec3{1, 0, 0}), turn(vec3{0, -1, 0})
 		}
 		err := group(flat{w: 2 * cubeHalf, h: 2 * cubeHalf, at: at}, func() error {
-			return s.panel(f, face.word, "The GPU reads the outline.", "A cube is six planes.", 2*cubeHalf, 2*cubeHalf, face.c, paper, 80, 22)
+			return s.cubeFace(f, face.word, face.c, paper)
 		})
 		if err != nil {
 			return err
 		}
 	}
 
-	s.Animated = true
+	s.Animated, s.Versus = true, true
 	s.frame = func(t float64, w, h int) []Span { return hallFrame(flats, t, w, h) }
 	return nil
 }
 
 // panel adds an opaque rectangle with a word and two smaller lines over it.
 func (s *Scene) panel(f *font.Font, word, caption, small string, w, h float32, back, fore [4]float32, wordSize, captionSize float32) error {
-	rect := slug.Drawing{Em: 1, Layers: []slug.Layer{{Path: slug.Path{
-		Verbs:  []slug.Verb{slug.MoveTo, slug.LineTo, slug.LineTo, slug.LineTo, slug.Close},
-		Points: []slug.Point{{X: 0, Y: 0}, {X: 1, Y: 0}, {X: 1, Y: 1}, {X: 0, Y: 1}},
-	}}}}
-	if err := s.add(slug.Key{Source: sourceHall}, rect, slug.Affine{w, 0, 0, -h, 0, h}, back); err != nil {
+	if err := s.rect(0, 0, w, h, back); err != nil {
 		return err
 	}
 	y := h * 0.5
@@ -160,6 +188,37 @@ func (s *Scene) panel(f *font.Font, word, caption, small string, w, h float32, b
 	}
 	y += captionSize
 	return s.text(f, small, captionSize*0.5, slug.Affine{1, 0, 0, 1, 16, y}, fore)
+}
+
+// cubeFace adds an opaque face with a word and lines of text that get smaller. Each
+// size shows where a method that reads a texture starts to lose thin strokes.
+func (s *Scene) cubeFace(f *font.Font, word string, back, fore [4]float32) error {
+	if err := s.rect(0, 0, 2*cubeHalf, 2*cubeHalf, back); err != nil {
+		return err
+	}
+	y := float32(50)
+	if err := s.text(f, word, 44, slug.Affine{1, 0, 0, 1, 16, y}, fore); err != nil {
+		return err
+	}
+	y += 6
+	for _, block := range cubeText {
+		for _, line := range block.lines {
+			y += block.size * 1.3
+			if err := s.text(f, line, block.size, slug.Affine{1, 0, 0, 1, 16, y}, fore); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// rect adds an opaque rectangle with its corner at x, y.
+func (s *Scene) rect(x, y, w, h float32, back [4]float32) error {
+	rect := slug.Drawing{Em: 1, Layers: []slug.Layer{{Path: slug.Path{
+		Verbs:  []slug.Verb{slug.MoveTo, slug.LineTo, slug.LineTo, slug.LineTo, slug.Close},
+		Points: []slug.Point{{X: 0, Y: 0}, {X: 1, Y: 0}, {X: 1, Y: 1}, {X: 0, Y: 1}},
+	}}}}
+	return s.add(slug.Key{Source: sourceHall}, rect, slug.Affine{w, 0, 0, -h, x, y + h}, back)
 }
 
 func fixed(origin, u, v vec3) func(float64) (vec3, vec3, vec3) {
