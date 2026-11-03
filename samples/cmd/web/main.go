@@ -2,10 +2,12 @@
 
 // Command web builds to app.wasm: it draws a scene in a browser tab, with WebGPU.
 // The address selects what the tab shows: ?scene=zoom selects a scene, and
-// &mode=debug or &mode=compare selects a view.
+// &mode=debug, &mode=compare, &mode=versus or &mode=versus-sdf selects a view. In a
+// versus view, &budget=16 gives the atlas 16 times the size of the pack.
 package main
 
 import (
+	"strconv"
 	"syscall/js"
 
 	"github.com/dhannyell/webgpu/wgpu"
@@ -88,6 +90,42 @@ func run() string {
 		r.Mode = render.Debug
 	case "compare":
 		r.Mode = render.Compare
+	case "versus":
+		r.Mode = render.VersusBitmap
+	case "versus-sdf":
+		r.Mode = render.VersusDistance
+	}
+	if b, err := strconv.Atoi(query("budget", "0")); err == nil {
+		r.Budget = b
+	}
+
+	hint := ""
+	if r.Orbited() {
+		hint = "Drag to turn. Use the wheel to zoom."
+		status(hint)
+		style := canvas.Get("style")
+		style.Set("cursor", "grab")
+		style.Set("touchAction", "none")
+		canvas.Call("addEventListener", "pointerdown", js.FuncOf(func(_ js.Value, args []js.Value) any {
+			canvas.Call("setPointerCapture", args[0].Get("pointerId"))
+			return nil
+		}))
+		canvas.Call("addEventListener", "pointermove", js.FuncOf(func(_ js.Value, args []js.Value) any {
+			if e := args[0]; e.Get("buttons").Int()&1 != 0 {
+				r.Drag(e.Get("movementX").Float(), e.Get("movementY").Float())
+			}
+			return nil
+		}))
+		// Only a listener that is not passive can stop the page from a scroll.
+		options := js.Global().Get("Object").New()
+		options.Set("passive", false)
+		canvas.Call("addEventListener", "wheel", js.FuncOf(func(_ js.Value, args []js.Value) any {
+			e := args[0]
+			e.Call("preventDefault")
+			dpr := js.Global().Get("devicePixelRatio").Float()
+			r.Wheel(-e.Get("deltaY").Float()/100, e.Get("offsetX").Float()*dpr, e.Get("offsetY").Float()*dpr, width, height)
+			return nil
+		}), options)
 	}
 
 	// The frame runs on this goroutine, not inside the callback: a callback
@@ -112,6 +150,10 @@ func run() string {
 		if d, ok := r.Compared(); ok && !shown {
 			shown = true
 			status("GPU and CPU: " + d.String())
+		}
+		if v, ok := r.Versus(); ok && !shown {
+			shown = true
+			status(v + " " + hint)
 		}
 		js.Global().Call("requestAnimationFrame", raf)
 	}

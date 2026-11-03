@@ -1,8 +1,10 @@
 //go:build cgo
 
 // Command native draws the scenes in a desktop window, with wgpu-native and GLFW.
-// The number keys select a scene, D shows the debug view, and C shows the
-// comparison of the GPU with the CPU.
+// The number keys select a scene, D shows the debug view, C shows the comparison
+// of the GPU with the CPU, and V and F show Slug next to a bitmap atlas and next to
+// a signed distance field. In the news scene, a drag turns the view, and the wheel
+// zooms.
 package main
 
 import (
@@ -117,7 +119,29 @@ func run() error {
 			toggle(render.Debug)
 		case glfw.KeyC:
 			toggle(render.Compare)
+		case glfw.KeyV:
+			toggle(render.VersusBitmap)
+		case glfw.KeyF:
+			toggle(render.VersusDistance)
 		}
+	})
+
+	var current *render.Renderer
+	lastX, lastY := window.GetCursorPos()
+	window.SetCursorPosCallback(func(_ *glfw.Window, x, y float64) {
+		if current != nil && window.GetMouseButton(glfw.MouseButtonLeft) == glfw.Press {
+			current.Drag(x-lastX, y-lastY)
+		}
+		lastX, lastY = x, y
+	})
+	window.SetScrollCallback(func(_ *glfw.Window, _, steps float64) {
+		if current == nil {
+			return
+		}
+		// The cursor is in window units, and the target is in pixels.
+		w, h := window.GetFramebufferSize()
+		ww, wh := window.GetSize()
+		current.Wheel(steps, lastX*float64(w)/float64(max(ww, 1)), lastY*float64(h)/float64(max(wh, 1)), w, h)
 	})
 
 	width, height := 0, 0
@@ -137,13 +161,20 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		current = r
 		if err := r.Present(surface, glfw.GetTime(), w, h); err != nil {
 			return err
 		}
 
-		next := fmt.Sprintf("go-slug samples: %s (keys 1-%d, D debug, C compare)", selected, len(scene.Names))
+		next := fmt.Sprintf("go-slug samples: %s (keys 1-%d, D debug, C compare, V and F versus)", selected, len(scene.Names))
 		if d, ok := r.Compared(); ok && mode == render.Compare {
 			next = "go-slug samples: " + selected + ": GPU and CPU: " + d.String()
+		}
+		if v, ok := r.Versus(); ok {
+			next = "go-slug samples: " + selected + ": " + v
+		}
+		if r.Orbited() {
+			next += " (drag to turn, wheel to zoom)"
 		}
 		if next != title {
 			title = next

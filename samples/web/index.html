@@ -26,15 +26,19 @@
   <a href="?scene=perspective">perspective</a>
   <a href="?scene=text">text</a>
   <a href="?scene=hall">hall</a>
+  <a href="?scene=dive">dive</a>
+  <a href="?scene=news">news</a>
   <a id="debug" href="?mode=debug">debug</a>
   <a id="compare" href="?mode=compare">compare</a>
+  <a id="versus" href="?mode=versus">versus</a>
+  <a id="versus-sdf" href="?mode=versus-sdf">versus sdf</a>
 </nav>
 <script>
 const status = document.getElementById("status");
 
-// The two views keep the current scene.
+// The views keep the current scene.
 const scene = new URLSearchParams(location.search).get("scene") || "overview";
-for (const mode of ["debug", "compare"]) {
+for (const mode of ["debug", "compare", "versus", "versus-sdf"]) {
   document.getElementById(mode).href = "?scene=" + scene + "&mode=" + mode;
 }
 

@@ -40,6 +40,8 @@ const (
 	sourceShape
 	sourceShaped
 	sourceHall
+	sourceNewsHead
+	sourceNewsTitle
 )
 
 // Item places one entry of the pack.
@@ -55,21 +57,24 @@ type Span struct {
 	View         Projection // from the coordinates of the items to target pixels
 }
 
-// MaxSpans is the largest number of spans in a frame.
-const MaxSpans = 32
+// MaxSpans is the largest number of spans in a frame. A versus view has each span
+// twice.
+const MaxSpans = 64
 
 // Scene is the pack, the items that use it, and the camera.
 type Scene struct {
 	Name     string
 	Animated bool // the view changes with the time
+	Versus   bool // an atlas can draw the scene: each glyph has one color
 	Pack     slug.Pack
 	Items    []Item
+	Orbit    *Orbit // the view that the user controls, or nil
 
 	frame func(t float64, w, h int) []Span
 }
 
 // Names lists the scenes that New can build.
-var Names = []string{"overview", "zoom", "perspective", "text", "hall"}
+var Names = []string{"overview", "zoom", "perspective", "text", "hall", "dive", "news"}
 
 // New builds the scene with the given name.
 func New(name string) (*Scene, error) {
@@ -89,6 +94,10 @@ func New(name string) (*Scene, error) {
 		return s, s.shaped()
 	case "hall":
 		return s, s.hall()
+	case "dive":
+		return s, s.dive()
+	case "news":
+		return s, s.news()
 	}
 	return nil, fmt.Errorf("scene: no scene %q", name)
 }

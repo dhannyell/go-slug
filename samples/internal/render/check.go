@@ -138,12 +138,21 @@ func abs(v int) int {
 
 // Capture draws s into a texture and reads the texture back.
 func Capture(device *wgpu.Device, s *scene.Scene, frame []scene.Span, w, h int) (*image.RGBA, error) {
+	return capture(device, s, Normal, frame, w, h)
+}
+
+// capture draws the whole target with Slug or with the traditional method of mode.
+func capture(device *wgpu.Device, s *scene.Scene, mode Mode, frame []scene.Span, w, h int) (*image.RGBA, error) {
 	const format = wgpu.TextureFormatRGBA8Unorm
 	r, err := New(device, format, s)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Release()
+	draw, err := r.drawing(mode)
+	if err != nil {
+		return nil, err
+	}
 
 	size := wgpu.Extent3D{Width: uint32(w), Height: uint32(h), DepthOrArrayLayers: 1}
 	tex, err := device.TryCreateTexture(&wgpu.TextureDescriptor{
@@ -170,7 +179,7 @@ func Capture(device *wgpu.Device, s *scene.Scene, frame []scene.Span, w, h int) 
 	}
 	defer staging.Release()
 
-	err = r.submit(target, r.pipeline, frame, w, h, func(encoder *wgpu.CommandEncoder) error {
+	err = r.encode(target, frame, w, h, draw, func(encoder *wgpu.CommandEncoder) error {
 		return encoder.TryCopyTextureToBuffer(
 			&wgpu.TexelCopyTextureInfo{Texture: tex, Aspect: wgpu.TextureAspectAll},
 			&wgpu.TexelCopyBufferInfo{Buffer: staging, Layout: wgpu.TexelCopyBufferLayout{BytesPerRow: uint32(row), RowsPerImage: uint32(h)}},
