@@ -38,6 +38,29 @@ func TestAffineThen(t *testing.T) {
 	}
 }
 
+func TestAffineInvert(t *testing.T) {
+	m := Affine{2, 0.5, 0.25, 3, 5, -7}
+	inv, ok := m.Invert()
+	if !ok {
+		t.Fatalf("Invert(%v) = false", m)
+	}
+	for _, p := range []Point{{0, 0}, {1, 0}, {0, 1}, {-3, 4.5}} {
+		if got := inv.Apply(m.Apply(p)); !near(got.X, p.X) || !near(got.Y, p.Y) {
+			t.Errorf("inverse of Apply(%v) = %v", p, got)
+		}
+	}
+
+	// The determinant of a small scale underflows float32.
+	if _, ok := (Affine{1e-25, 0, 0, 1e-25, 0, 0}).Invert(); !ok {
+		t.Errorf("small scale: Invert = false")
+	}
+	for _, m := range []Affine{{}, {1, 2, 2, 4, 0, 0}, {float32(math.NaN()), 0, 0, 1, 0, 0}} {
+		if _, ok := m.Invert(); ok {
+			t.Errorf("Invert(%v) = true", m)
+		}
+	}
+}
+
 func near(a, b float32) bool {
 	return math.Abs(float64(a-b)) <= 1e-5*max(1, math.Abs(float64(b)))
 }

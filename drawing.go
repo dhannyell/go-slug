@@ -5,6 +5,8 @@
 // viewBox units for icons.
 package slug
 
+import "math"
+
 // Point is a position in drawing units.
 type Point struct{ X, Y float32 }
 
@@ -46,6 +48,29 @@ func (m Affine) Then(next Affine) Affine {
 		a2*e1 + c2*f1 + e2,
 		b2*e1 + d2*f1 + f2,
 	}
+}
+
+// Invert returns the inverse of m. It returns false when the inverse is not
+// finite, which includes a singular m.
+func (m Affine) Invert() (Affine, bool) {
+	// float64: the determinant of a small scale underflows float32.
+	a, b, c, d := float64(m[0]), float64(m[1]), float64(m[2]), float64(m[3])
+	e, f := float64(m[4]), float64(m[5])
+	det := a*d - b*c
+	inv := Affine{
+		float32(d / det),
+		float32(-b / det),
+		float32(-c / det),
+		float32(a / det),
+		float32((c*f - d*e) / det),
+		float32((b*e - a*f) / det),
+	}
+	for _, v := range inv {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return Affine{}, false
+		}
+	}
+	return inv, true
 }
 
 func (m Affine) unpack() (a, b, c, d, e, f float32) {
