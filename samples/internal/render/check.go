@@ -16,21 +16,23 @@ import (
 // fused multiply-add that a GPU can use.
 const Tolerance = 6
 
-// noise is the distance in pixels that the interpolation of a GPU can move a
+// noises are the distances in pixels that the interpolation of a GPU can move a
 // sample. Slug coverage jumps where the line of an edge passes a corner, because
 // a ray sees a curve only inside the span of the curve. A sample on that line can
-// go to either side, so the oracle of such a pixel is a range.
-const noise = 1.0 / 512
+// go to either side, so the oracle of such a pixel is a range. The coverage can
+// fall quickly after the jump, so the range needs a short and a long distance.
+var noises = []float32{1.0 / 65536, 1.0 / 512}
 
 // Diff is the result of a comparison of the two renderers.
 type Diff struct {
-	Max    int // the largest difference of a channel from the oracle
-	Pixels int // the pixels over Tolerance
-	Total  int // the pixels compared
+	Max    int         // the largest difference of a channel from the oracle
+	Pixels int         // the pixels over Tolerance
+	Total  int         // the pixels compared
+	Worst  image.Point // the pixel of Max
 }
 
 func (d Diff) String() string {
-	return fmt.Sprintf("max difference %d/255, %d of %d pixels over %d", d.Max, d.Pixels, d.Total, Tolerance)
+	return fmt.Sprintf("max difference %d/255 at %v, %d of %d pixels over %d", d.Max, d.Worst, d.Pixels, d.Total, Tolerance)
 }
 
 // Check draws s with the GPU and with the CPU, and compares the two images.
@@ -56,12 +58,14 @@ func Check(device *wgpu.Device, s *scene.Scene, w, h int) (Diff, error) {
 	}
 	oracle := []*image.RGBA{want}
 	if len(outliers) > 0 {
-		for _, o := range [][2]float32{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}} {
-			moved, err := s.Rasterize(w, h, o[0]*noise, o[1]*noise)
-			if err != nil {
-				return Diff{}, err
+		for _, noise := range noises {
+			for _, o := range [][2]float32{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}} {
+				moved, err := s.Rasterize(w, h, o[0]*noise, o[1]*noise)
+				if err != nil {
+					return Diff{}, err
+				}
+				oracle = append(oracle, moved)
 			}
-			oracle = append(oracle, moved)
 		}
 	}
 
@@ -76,7 +80,9 @@ func Check(device *wgpu.Device, s *scene.Scene, w, h int) (Diff, error) {
 			v := int(got.Pix[i+c])
 			worst = max(worst, lo-v, v-hi)
 		}
-		d.Max = max(d.Max, worst)
+		if worst > d.Max {
+			d.Max, d.Worst = worst, image.Pt(i/4%w, i/4/w)
+		}
 		if worst > Tolerance {
 			d.Pixels++
 		}
