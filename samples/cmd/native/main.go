@@ -1,6 +1,8 @@
 //go:build cgo
 
-// Command native draws the scene in a desktop window, with wgpu-native and GLFW.
+// Command native draws the scenes in a desktop window, with wgpu-native and GLFW.
+// The keys 1 to 4 select a scene, D shows the debug view, and C shows the
+// comparison of the GPU with the CPU.
 package main
 
 import (
@@ -72,23 +74,54 @@ func run() error {
 		})
 	}
 
-	s, err := scene.New()
-	if err != nil {
-		return err
+	// A renderer holds a pack on the GPU, so build each one once.
+	renderers := map[string]*render.Renderer{}
+	defer func() {
+		for _, r := range renderers {
+			r.Release()
+		}
+	}()
+	selected, mode := scene.Names[0], render.Normal
+	selectRenderer := func() (*render.Renderer, error) {
+		r, ok := renderers[selected]
+		if !ok {
+			s, err := scene.New(selected)
+			if err != nil {
+				return nil, err
+			}
+			if r, err = render.New(device, format, s); err != nil {
+				return nil, err
+			}
+			renderers[selected] = r
+		}
+		r.Mode = mode
+		return r, nil
 	}
-	r, err := render.New(device, format, s)
-	if err != nil {
-		return err
-	}
-	defer r.Release()
 
-	check, err := render.Check(device, s, scene.Width, scene.Height)
-	if err != nil {
-		return err
-	}
-	fmt.Println("GPU and CPU:", check)
+	window.SetKeyCallback(func(_ *glfw.Window, key glfw.Key, _ int, action glfw.Action, _ glfw.ModifierKey) {
+		if action != glfw.Press {
+			return
+		}
+		if i := int(key - glfw.Key1); i >= 0 && i < len(scene.Names) {
+			selected = scene.Names[i]
+		}
+		toggle := func(m render.Mode) {
+			if mode == m {
+				mode = render.Normal
+			} else {
+				mode = m
+			}
+		}
+		switch key {
+		case glfw.KeyD:
+			toggle(render.Debug)
+		case glfw.KeyC:
+			toggle(render.Compare)
+		}
+	})
 
 	width, height := 0, 0
+	title := ""
 	for !window.ShouldClose() {
 		glfw.PollEvents()
 		w, h := window.GetFramebufferSize()
@@ -100,8 +133,21 @@ func run() error {
 			width, height = w, h
 			configure(w, h)
 		}
-		if err := r.Present(surface, w, h); err != nil {
+		r, err := selectRenderer()
+		if err != nil {
 			return err
+		}
+		if err := r.Present(surface, glfw.GetTime(), w, h); err != nil {
+			return err
+		}
+
+		next := fmt.Sprintf("go-slug samples: %s (keys 1-%d, D debug, C compare)", selected, len(scene.Names))
+		if d, ok := r.Compared(); ok && mode == render.Compare {
+			next = "go-slug samples: " + selected + ": GPU and CPU: " + d.String()
+		}
+		if next != title {
+			title = next
+			window.SetTitle(title)
 		}
 	}
 	return nil

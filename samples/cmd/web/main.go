@@ -1,11 +1,11 @@
 //go:build js && wasm
 
-// Command web builds to app.wasm: it draws the scene in a browser tab, with
-// WebGPU. The address ?check compares the GPU with the CPU and shows the result.
+// Command web builds to app.wasm: it draws a scene in a browser tab, with WebGPU.
+// The address selects what the tab shows: ?scene=zoom selects a scene, and
+// &mode=debug or &mode=compare selects a view.
 package main
 
 import (
-	"strings"
 	"syscall/js"
 
 	"github.com/dhannyell/webgpu/wgpu"
@@ -24,6 +24,15 @@ func main() {
 func status(text string) {
 	println(text)
 	js.Global().Get("document").Call("getElementById", "status").Set("textContent", text)
+}
+
+// query returns a parameter of the address, or fallback.
+func query(name, fallback string) string {
+	params := js.Global().Get("URLSearchParams").New(js.Global().Get("location").Get("search"))
+	if v := params.Call("get", name); !v.IsNull() {
+		return v.String()
+	}
+	return fallback
 }
 
 func run() string {
@@ -66,7 +75,7 @@ func run() string {
 	}
 	configure(width, height)
 
-	s, err := scene.New()
+	s, err := scene.New(query("scene", scene.Names[0]))
 	if err != nil {
 		return err.Error()
 	}
@@ -74,32 +83,35 @@ func run() string {
 	if err != nil {
 		return err.Error()
 	}
-
-	if strings.Contains(js.Global().Get("location").Get("search").String(), "check") {
-		d, err := render.Check(device, s, scene.Width, scene.Height)
-		if err != nil {
-			return err.Error()
-		}
-		status("GPU and CPU: " + d.String())
+	switch query("mode", "") {
+	case "debug":
+		r.Mode = render.Debug
+	case "compare":
+		r.Mode = render.Compare
 	}
 
 	// The frame runs on this goroutine, not inside the callback: a callback
 	// must not block the event loop.
-	frames := make(chan struct{}, 1)
-	raf := js.FuncOf(func(js.Value, []js.Value) any {
-		frames <- struct{}{}
+	frames := make(chan float64, 1)
+	raf := js.FuncOf(func(_ js.Value, args []js.Value) any {
+		frames <- args[0].Float() / 1000
 		return nil
 	})
 	js.Global().Call("requestAnimationFrame", raf)
-	for range frames {
+	shown := false
+	for now := range frames {
 		if w, h := size(); w != width || h != height {
 			width, height = w, h
 			canvas.Set("width", w)
 			canvas.Set("height", h)
 			configure(w, h)
 		}
-		if err := r.Present(surface, width, height); err != nil {
+		if err := r.Present(surface, now, width, height); err != nil {
 			return err.Error()
+		}
+		if d, ok := r.Compared(); ok && !shown {
+			shown = true
+			status("GPU and CPU: " + d.String())
 		}
 		js.Global().Call("requestAnimationFrame", raf)
 	}

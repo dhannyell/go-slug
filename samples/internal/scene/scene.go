@@ -1,8 +1,9 @@
-// Package scene holds the sample drawing, and draws it on the CPU. It does not
+// Package scene holds the sample drawings, and draws them on the CPU. It does not
 // import a GPU package, so the two renderers stay apart.
 package scene
 
 import (
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
@@ -13,7 +14,11 @@ import (
 
 	slug "github.com/dhannyell/go-slug"
 	"github.com/dhannyell/go-slug/font"
+	"github.com/dhannyell/go-slug/text"
 )
+
+//go:embed fonts/Amiri-Regular.ttf
+var amiri []byte
 
 // Width and Height are the design size, in pixels.
 const (
@@ -33,6 +38,7 @@ var (
 const (
 	sourceFont uint32 = iota
 	sourceShape
+	sourceShaped
 )
 
 // Item places one entry of the pack.
@@ -42,19 +48,47 @@ type Item struct {
 	Color [4]float32
 }
 
-// Scene is the pack and the items that use it.
+// Scene is the pack, the items that use it, and the camera.
 type Scene struct {
-	Pack  slug.Pack
-	Items []Item
+	Name     string
+	Animated bool // the view changes with the time
+	Pack     slug.Pack
+	Items    []Item
+
+	view func(t float64, w, h int) Projection
 }
 
-// New builds the scene.
-func New() (*Scene, error) {
+// Names lists the scenes that New can build.
+var Names = []string{"overview", "zoom", "perspective", "text"}
+
+// New builds the scene with the given name.
+func New(name string) (*Scene, error) {
+	s := &Scene{Name: name}
+	switch name {
+	case "overview":
+		s.view = still
+		return s, s.overview()
+	case "zoom":
+		s.Animated, s.view = true, zoom
+		return s, s.overview()
+	case "perspective":
+		s.Animated, s.view = true, perspective
+		return s, s.overview()
+	case "text":
+		s.view = still
+		return s, s.shaped()
+	}
+	return nil, fmt.Errorf("scene: no scene %q", name)
+}
+
+// View returns the camera at t seconds, for a target of w by h pixels.
+func (s *Scene) View(t float64, w, h int) Projection { return s.view(t, w, h) }
+
+func (s *Scene) overview() error {
 	f, err := font.Parse(goregular.TTF)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	s := &Scene{}
 	lines := []struct {
 		text string
 		size float32
@@ -71,7 +105,7 @@ func New() (*Scene, error) {
 	}
 	for _, l := range lines {
 		if err := s.text(f, l.text, l.size, l.line, l.c); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -86,10 +120,70 @@ func New() (*Scene, error) {
 	}
 	for i, d := range shapes {
 		if err := s.add(slug.Key{Source: sourceShape, ID: uint32(i)}, d.d, d.place, d.c); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return s, nil
+	return nil
+}
+
+// shaped shows what the text module adds to the font package.
+func (s *Scene) shaped() error {
+	f, err := text.Parse(amiri, sourceShaped)
+	if err != nil {
+		return err
+	}
+	plain, err := font.Parse(amiri)
+	if err != nil {
+		return err
+	}
+
+	const sample = "office affluent fjord"
+	if err := s.line(f, "Shaped: "+sample, text.Options{}, 54, 40, 90, ink); err != nil {
+		return err
+	}
+	if err := s.text(plain, "Plain:  "+sample, 54, slug.Affine{1, 0, 0, 1, 40, 158}, faded); err != nil {
+		return err
+	}
+	// Cursive joins, marks over the letters, and a run from right to left.
+	if err := s.line(f, "مَرْحَبًا بِالعَالَم", text.Options{RTL: true}, 78, 920, 262, accent); err != nil {
+		return err
+	}
+	if err := s.line(f, "Slug رسم الخطوط works in one line", text.Options{}, 44, 40, 340, ink); err != nil {
+		return err
+	}
+
+	const size = 24
+	paragraph := "The text module shapes a string into glyphs, and breaks it into lines. " +
+		"The pack stores each glyph once, and a ligature is one more glyph."
+	y := float32(400)
+	for _, l := range f.Shape(paragraph, text.Options{Width: 880.0 / size}) {
+		if err := s.place(f, l, size, 40, y, ink); err != nil {
+			return err
+		}
+		y += size * 1.35
+	}
+	return nil
+}
+
+// line adds the first line of a shaped string. With a right-to-left base, x is
+// the right end of the line.
+func (s *Scene) line(f *text.Font, str string, o text.Options, size, x, y float32, c [4]float32) error {
+	l := f.Shape(str, o)[0]
+	if o.RTL {
+		x -= l.Width * size
+	}
+	return s.place(f, l, size, x, y, c)
+}
+
+func (s *Scene) place(f *text.Font, l text.Line, size, x, y float32, c [4]float32) error {
+	for _, g := range l.Glyphs {
+		e, err := f.Add(&s.Pack, g)
+		if err != nil {
+			return err
+		}
+		s.Items = append(s.Items, Item{e, g.At(size).Then(slug.Affine{1, 0, 0, 1, x, y}), c})
+	}
+	return nil
 }
 
 // text adds one line without shaping. line moves the baseline from the design
@@ -133,20 +227,138 @@ func Fit(w, h int) slug.Affine {
 	return slug.Affine{k, 0, 0, k, (float32(w) - Width*k) / 2, (float32(h) - Height*k) / 2}
 }
 
-// Rasterize draws the scene on the CPU, over Background. dx and dy move the
-// scene, in pixels.
-func (s *Scene) Rasterize(w, h int, dx, dy float32) (*image.RGBA, error) {
+func still(_ float64, w, h int) Projection { return FromAffine(Fit(w, h)) }
+
+// ZoomPeriod is the time of one zoom in and out. The peak is at half of it.
+const ZoomPeriod = 20.0
+
+// zoom moves from the whole design to one letter of the 16-pixel line.
+func zoom(t float64, w, h int) Projection {
+	const peak = 256
+	const targetX, targetY = 45.0, 178.0
+
+	fit := FromAffine(Fit(w, h))
+	k := math.Pow(peak, 0.5-0.5*math.Cos(2*math.Pi*t/ZoomPeriod))
+	// The target moves to the center of the image as the zoom grows.
+	x, y := fit.Apply(targetX, targetY)
+	blend := 1 - 1/k
+	cx := x + (float64(w)/2-x)*blend
+	cy := y + (float64(h)/2-y)*blend
+	return fit.Then(Projection{k, 0, cx - k*x, 0, k, cy - k*y, 0, 0, 1})
+}
+
+// perspective turns the design as a plane in front of a camera.
+func perspective(t float64, w, h int) Projection {
+	const distance = 1100 // from the camera to the plane, in design pixels
+	const margin = 0.85   // the corners stay inside the image as the plane turns
+	sinY, cosY := math.Sincos(0.65 * math.Sin(t*0.5))
+	sinX, cosX := math.Sincos(0.40 * math.Cos(t*0.35))
+	turned := Projection{
+		cosY, sinY * sinX, 0,
+		0, cosX, 0,
+		-sinY / distance, cosY * sinX / distance, 1,
+	}
+	return Projection{1, 0, -Width / 2, 0, 1, -Height / 2, 0, 0, 1}.
+		Then(turned).
+		Then(Projection{margin, 0, Width / 2, 0, margin, Height / 2, 0, 0, 1}).
+		Then(FromAffine(Fit(w, h)))
+}
+
+// Rasterize draws the scene on the CPU, over Background.
+func (s *Scene) Rasterize(w, h int, view Projection) (*image.RGBA, error) {
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(dst, dst.Bounds(), image.NewUniform(Background), image.Point{}, draw.Src)
-	fit := Fit(w, h)
-	fit[4] += dx
-	fit[5] += dy
+	if view.IsAffine() {
+		m := view.Tangent(0, 0)
+		for _, it := range s.Items {
+			if err := s.Pack.Rasterize(it.Entry, it.Place.Then(m), it.Color, dst); err != nil {
+				return nil, err
+			}
+		}
+		return dst, nil
+	}
 	for _, it := range s.Items {
-		if err := s.Pack.Rasterize(it.Entry, it.Place.Then(fit), it.Color, dst); err != nil {
-			return nil, err
+		if it.Entry.LayerCount == 0 {
+			continue
+		}
+		area := reach(it, view).Intersect(dst.Rect)
+		for y := area.Min.Y; y < area.Max.Y; y++ {
+			for x := area.Min.X; x < area.Max.X; x++ {
+				px := dst.SubImage(image.Rect(x, y, x+1, y+1)).(*image.RGBA)
+				if err := s.Pack.Rasterize(it.Entry, it.Place.Then(pixelView(view, x, y)), it.Color, px); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return dst, nil
+}
+
+// pixelView returns the tangent of view at the center of one pixel. The tangent
+// is exact at the only point that the pixel samples, so a perspective needs only
+// the affine API of the pack.
+func pixelView(view Projection, x, y int) slug.Affine {
+	dx, dy := view.Invert().Apply(float64(x)+0.5, float64(y)+0.5)
+	return view.Tangent(dx, dy)
+}
+
+// Near returns the items that can touch the pixel x, y through a view moved by
+// less than one pixel.
+func (s *Scene) Near(view Projection, x, y int) []Item {
+	var near []Item
+	for _, it := range s.Items {
+		if it.Entry.LayerCount > 0 && image.Pt(x, y).In(reach(it, view)) {
+			near = append(near, it)
+		}
+	}
+	return near
+}
+
+// Pixel draws one pixel on the CPU, with the items that Near returned.
+func (s *Scene) Pixel(items []Item, view Projection, x, y int) (color.RGBA, error) {
+	px := image.NewRGBA(image.Rect(x, y, x+1, y+1))
+	px.SetRGBA(x, y, Background)
+	m := pixelView(view, x, y)
+	for _, it := range items {
+		if err := s.Pack.Rasterize(it.Entry, it.Place.Then(m), it.Color, px); err != nil {
+			return color.RGBA{}, err
+		}
+	}
+	return px.RGBAAt(x, y), nil
+}
+
+// reach returns the pixels near the bounds of an item, with a margin for the
+// antialiased edge.
+func reach(it Item, view Projection) image.Rectangle {
+	const margin = 2
+	b := it.Entry.Bounds
+	x0, y0 := math.Inf(1), math.Inf(1)
+	x1, y1 := math.Inf(-1), math.Inf(-1)
+	for _, c := range []slug.Point{b.Min, {X: b.Max.X, Y: b.Min.Y}, {X: b.Min.X, Y: b.Max.Y}, b.Max} {
+		p := it.Place.Apply(c)
+		x, y := view.Apply(float64(p.X), float64(p.Y))
+		x0, y0 = min(x0, x), min(y0, y)
+		x1, y1 = max(x1, x), max(y1, y)
+	}
+	return image.Rect(int(x0)-margin, int(y0)-margin, int(x1)+margin, int(y1)+margin)
+}
+
+// Label draws a short text with its baseline at x, y over dst.
+func Label(dst *image.RGBA, x, y float32, str string) error {
+	f, err := font.Parse(goregular.TTF)
+	if err != nil {
+		return err
+	}
+	s := &Scene{}
+	if err := s.text(f, str, 18, slug.Affine{1, 0, 0, 1, x, y}, accent); err != nil {
+		return err
+	}
+	for _, it := range s.Items {
+		if err := s.Pack.Rasterize(it.Entry, it.Place, it.Color, dst); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func turn(degrees float64) slug.Affine {
