@@ -394,9 +394,10 @@ func (l Line) stopsIn(c cluster) (first, count int) {
 }
 
 // graphemeStart returns the first rune of the grapheme that holds the rune at index.
+// An index from End stays the same, because it is after the last grapheme of the line.
 func (l Line) graphemeStart(index int) int {
 	i, found := slices.BinarySearch(l.stops, index)
-	if found || i == 0 {
+	if found || i == 0 || index >= l.End {
 		return index
 	}
 	return l.stops[i-1]

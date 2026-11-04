@@ -98,6 +98,10 @@ func TestCaretAndPointerAgree(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			line := load(t, c.font).Shape(c.text, c.o)[0]
+			// The loop compares only X, so a wrong X at End agrees with itself.
+			if got := line.ClusterAt(line.XOf(line.End)); got != line.End {
+				t.Errorf("the caret at End returns rune %d, want %d", got, line.End)
+			}
 			for i := line.Start; i <= line.End; i++ {
 				x := line.XOf(i)
 				if got := line.ClusterAt(x); line.XOf(got) != x {
