@@ -21,6 +21,7 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - [Quick start](#quick-start)
 - [Draw on the GPU](#draw-on-the-gpu)
 - [Shape text](#shape-text)
+- [Limit the memory](#limit-the-memory)
 - [Compare with other methods](#compare-with-other-methods)
 - [Limits in 3D](#limits-in-3d)
 - [Samples](#samples)
@@ -35,13 +36,14 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - **Fonts, icons and shapes.** A `Drawing` has layers of filled paths, with fill rules,
   transforms and solid colors. The `font` package reads TrueType and OpenType glyphs.
 - **Exact perspective.** A plane in 3D needs only its matrix.
-- **Incremental upload.** A `Pack` only grows, and `TakeDirty` tells which data is new.
+- **Incremental upload.** A `Pack` is an arena with an optional limit. `TakeDirty` tells
+  which data is new, and `Reset` empties it for a new generation.
 - **Cache on disk.** `Pack.Encode` and `Decode` store the data in a
   [versioned format](FORMAT.md).
 - **CPU copy of the shader.** `Pack.Rasterize` draws without a GPU. The tests use it as
   the oracle of the WGSL code.
 - **Optional text shaping.** The [`text`](text) module adds kerning, ligatures,
-  right-to-left text and line breaks.
+  right-to-left text, line breaks, alignment, line metrics and caret positions.
 
 ## Install
 
@@ -172,6 +174,31 @@ for _, line := range f.Shape("office", text.Options{}) {
 ```
 
 `Shape` uses one font for all of the string. A font fallback is the work of the caller.
+
+`Options` also has the width of a line, the alignment, a limit on the lines and an
+ellipsis. For the size of a line, `Line` has `Ascent`, `Descent` and `Gap`, and
+`Height` is the distance to the next baseline. For a text field, `Line.XOf` gives the X
+of a caret, and `Line.ClusterAt` gives the rune at a pointer.
+
+## Limit the memory
+
+A `Pack` keeps one copy of each outline at each size, so the amount of text does not
+make it larger. Only new shapes do. For a limit, set `MaxBytes` and make buffers of this
+size:
+
+```go
+pack := slug.Pack{MaxBytes: 16 << 20}
+
+entry, err := pack.Add(key, drawing)
+if errors.Is(err, slug.ErrPackFull) {
+	// Finish this frame. At the start of the next frame, call pack.Reset
+	// and add the visible shapes again.
+}
+```
+
+`Reset` makes each old `Entry` invalid. `Generation` changes at each `Reset`, so a host
+that keeps an `Entry` can know when to get it again. Use a second `Pack` for shapes that
+live for less time, such as a chart.
 
 ## Compare with other methods
 

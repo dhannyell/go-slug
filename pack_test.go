@@ -60,6 +60,72 @@ func mustAdd(t *testing.T, p *Pack, id uint32, d Drawing) Entry {
 	return e
 }
 
+// A full Pack must keep no part of the drawing: a later Add would write its layers
+// after the remains, and the upload ranges would be wrong.
+func TestAddToAFullPackChangesNothing(t *testing.T) {
+	first := Drawing{Em: testEm, Layers: []Layer{{Path: squarePath(0, 0, 100)}}}
+	second := Drawing{Em: testEm, Layers: []Layer{{Path: ringPath(128, 128, 90, 8)}, {Path: squarePath(0, 0, 50)}}}
+
+	var want Pack
+	mustAdd(t, &want, 1, first)
+	mustAdd(t, &want, 2, second)
+
+	var p Pack
+	mustAdd(t, &p, 1, first)
+	p.MaxBytes = p.Size()
+	size := p.Size()
+	if _, err := p.Add(Key{ID: 2}, second); !errors.Is(err, ErrPackFull) {
+		t.Fatalf("got error %v, want ErrPackFull", err)
+	}
+	if p.Size() != size {
+		t.Errorf("size is %d after the failure, want %d", p.Size(), size)
+	}
+	if _, ok := p.Lookup(Key{ID: 2}); ok || len(p.Entries()) != 1 {
+		t.Errorf("the failed drawing has an entry")
+	}
+
+	p.MaxBytes = 0
+	mustAdd(t, &p, 2, second)
+	if !slices.Equal(p.Curves(), want.Curves()) || !slices.Equal(p.Bands(), want.Bands()) || !slices.Equal(p.Layers(), want.Layers()) {
+		t.Errorf("the failed Add left data in the pack")
+	}
+}
+
+// After Reset the host writes from index 0. The data must equal a new Pack, or the
+// old buffers would keep wrong addresses.
+func TestResetStartsANewGeneration(t *testing.T) {
+	d := Drawing{Em: testEm, Layers: []Layer{{Path: ringPath(128, 128, 90, 8)}}}
+
+	var p Pack
+	mustAdd(t, &p, 1, Drawing{Em: testEm, Layers: []Layer{{Path: squarePath(0, 0, 100)}}})
+	mustAdd(t, &p, 2, d)
+	p.TakeDirty()
+
+	p.Reset()
+	if p.Generation() != 1 {
+		t.Errorf("generation is %d, want 1", p.Generation())
+	}
+	if p.Size() != 0 || len(p.Entries()) != 0 {
+		t.Errorf("size %d and %d entries after Reset", p.Size(), len(p.Entries()))
+	}
+	if _, ok := p.Lookup(Key{ID: 1}); ok {
+		t.Errorf("an old key is still in the pack")
+	}
+
+	got := mustAdd(t, &p, 2, d)
+	var fresh Pack
+	want := mustAdd(t, &fresh, 2, d)
+	if got != want {
+		t.Errorf("got entry %+v, want %+v", got, want)
+	}
+	if !slices.Equal(p.Curves(), fresh.Curves()) || !slices.Equal(p.Bands(), fresh.Bands()) || !slices.Equal(p.Layers(), fresh.Layers()) {
+		t.Errorf("the data differs from a new Pack")
+	}
+	if dirty := p.TakeDirty(); dirty != fresh.TakeDirty() {
+		t.Errorf("got dirty ranges %+v after Reset", dirty)
+	}
+}
+
 // emShapes returns the shapes of d in the space of the pack data.
 func emShapes(t *testing.T, d Drawing) []shape {
 	t.Helper()
