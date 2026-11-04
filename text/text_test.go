@@ -9,9 +9,9 @@ import (
 	slug "github.com/dhannyell/go-slug"
 )
 
-func raleway(t *testing.T) *Font { return load(t, "common/Raleway-v4020-Regular.otf") }
+func raleway(t testing.TB) *Font { return load(t, "common/Raleway-v4020-Regular.otf") }
 
-func load(t *testing.T, name string) *Font {
+func load(t testing.TB, name string) *Font {
 	t.Helper()
 	data, err := opentype.Files.ReadFile(name)
 	if err != nil {
@@ -329,4 +329,78 @@ func TestLinesAndClusters(t *testing.T) {
 			t.Errorf("line %d has width %v", i, l.Width)
 		}
 	}
+}
+
+// A hit must give the result of Shape, without a second layout.
+func TestShapeCacheReturnsTheSameLines(t *testing.T) {
+	f := raleway(t)
+	c := NewShapeCache(8)
+	first := c.Shape(f, "office", Options{})
+	if want := f.Shape("office", Options{}); len(first) != 1 || !slices.Equal(first[0].Glyphs, want[0].Glyphs) {
+		t.Fatalf("lines: got %v, want %v", first, want)
+	}
+	if second := c.Shape(f, "office", Options{}); &second[0] != &first[0] {
+		t.Error("the second call did not use the cache")
+	}
+}
+
+// A key without the font or the options gives the layout of other text, with no error.
+func TestShapeCacheKeyHasFontAndOptions(t *testing.T) {
+	f := raleway(t)
+	c := NewShapeCache(8)
+	first := c.Shape(f, "office", Options{})
+	if other := c.Shape(f, "office", Options{RTL: true}); &other[0] == &first[0] {
+		t.Error("other options used the same result")
+	}
+	if other := c.Shape(raleway(t), "office", Options{}); &other[0] == &first[0] {
+		t.Error("another font used the same result")
+	}
+}
+
+// A used result survives a rotation, and an unused result does not.
+func TestShapeCacheDropsOldEntries(t *testing.T) {
+	f := raleway(t)
+	c := NewShapeCache(4) // two results in each generation
+	used := c.Shape(f, "used", Options{})
+	unused := c.Shape(f, "unused", Options{})
+	c.Shape(f, "first rotation", Options{})
+	if again := c.Shape(f, "used", Options{}); &again[0] != &used[0] {
+		t.Fatal("the first rotation dropped a result")
+	}
+	c.Shape(f, "second rotation", Options{})
+	if again := c.Shape(f, "used", Options{}); &again[0] != &used[0] {
+		t.Error("the second rotation dropped a used result")
+	}
+	if again := c.Shape(f, "unused", Options{}); &again[0] == &unused[0] {
+		t.Error("the second rotation kept an unused result")
+	}
+}
+
+// A frame reads the cache one time for each label.
+func TestShapeCacheHitDoesNotAllocate(t *testing.T) {
+	f := raleway(t)
+	c := NewShapeCache(8)
+	c.Shape(f, "office", Options{})
+	if allocs := testing.AllocsPerRun(100, func() { c.Shape(f, "office", Options{}) }); allocs != 0 {
+		t.Errorf("allocs: %v", allocs)
+	}
+}
+
+func BenchmarkShapeCache(b *testing.B) {
+	f := raleway(b)
+	const label = "Hit points: 1234 of 5678"
+	b.Run("no-cache", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			f.Shape(label, Options{})
+		}
+	})
+	b.Run("hit", func(b *testing.B) {
+		c := NewShapeCache(8)
+		c.Shape(f, label, Options{})
+		b.ReportAllocs()
+		for range b.N {
+			c.Shape(f, label, Options{})
+		}
+	})
 }
