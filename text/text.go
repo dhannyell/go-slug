@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-text/typesetting/di"
 	gofont "github.com/go-text/typesetting/font"
+	"github.com/go-text/typesetting/harfbuzz"
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/segmenter"
 	"github.com/go-text/typesetting/shaping"
@@ -45,6 +46,7 @@ type Font struct {
 	segments shaping.Segmenter
 	wrapper  shaping.LineWrapper
 	breaks   segmenter.Segmenter
+	carets   *harfbuzz.Font // made at the first ligature; reads the GDEF table
 }
 
 // Parse parses a TrueType or OpenType font. source is the Key.Source of the
@@ -122,7 +124,14 @@ type Line struct {
 	End    int     // the index after the last rune; it includes runes of the paragraph that an ellipsis removed
 	Metrics
 
-	stops []int // the first rune of each grapheme of the paragraph, in order
+	stops     []int // the first rune of each grapheme of the paragraph, in order
+	ligatures []ligature
+}
+
+// ligature is the carets that a font gives for the one spacing glyph of a cluster.
+type ligature struct {
+	cluster int
+	x       []float32 // in em, from left to right; nil if the font has no usable carets
 }
 
 // oneFace implements shaping.Fontmap: all runes use the one face.
@@ -204,8 +213,49 @@ func (f *Font) shapeParagraph(runes []rune, offset int, config shaping.WrapConfi
 		lines[i] = layOut(runs, offset, truncator)
 		lines[i].Metrics = f.Metrics()
 		lines[i].stops = stops
+		lines[i].ligatures = f.ligatures(lines[i].Glyphs)
 	}
 	return lines
+}
+
+// ligatures reads the carets of the glyphs that hold more than one rune. A cluster
+// with two spacing glyphs has no carets, because the carets of one do not cover both.
+func (f *Font) ligatures(glyphs []Glyph) []ligature {
+	var out []ligature
+	for _, g := range glyphs {
+		if g.Runes < 2 || g.Advance <= 0 {
+			continue
+		}
+		if n := len(out); n > 0 && out[n-1].cluster == g.Cluster {
+			out[n-1].x = nil
+			continue
+		}
+		out = append(out, ligature{g.Cluster, f.caretsOf(g)})
+	}
+	return out
+}
+
+// caretsOf returns the carets of g, or nil if they are not in order inside the glyph.
+// The font is input data, so its values can be wrong.
+func (f *Font) caretsOf(g Glyph) []float32 {
+	if f.carets == nil {
+		f.carets = harfbuzz.NewFont(f.face)
+		f.carets.XScale, f.carets.YScale = int32(f.face.Upem()), int32(f.face.Upem())
+	}
+	carets := f.carets.GetOTLigatureCarets(harfbuzz.LeftToRight, harfbuzz.GID(g.ID))
+	if len(carets) == 0 {
+		return nil
+	}
+	x := make([]float32, len(carets))
+	last := g.X
+	for i, c := range carets {
+		x[i] = g.X + float32(c)/float32(f.face.Upem())
+		if x[i] <= last || x[i] >= g.X+g.Advance {
+			return nil
+		}
+		last = x[i]
+	}
+	return x
 }
 
 // graphemes returns the index of the first rune of each grapheme in runes.
@@ -279,6 +329,11 @@ func align(lines []Line, o Options) {
 			l.Glyphs[j].X += l.Left
 			l.Glyphs[j].pen += l.Left
 		}
+		for _, lig := range l.ligatures {
+			for j := range lig.x {
+				lig.x[j] += l.Left
+			}
+		}
 	}
 }
 
@@ -289,6 +344,19 @@ type cluster struct {
 	start, runes int
 	left, right  float32
 	rtl          bool
+	carets       []float32 // the carets of the font, from left to right
+}
+
+// stopX returns the X of caret k of count graphemes, in the order of the text. It uses
+// the carets of the font only if they match the graphemes.
+func (c cluster) stopX(k, count int) float32 {
+	if k > 0 && k < count && len(c.carets) == count-1 {
+		if c.rtl {
+			return c.carets[count-1-k]
+		}
+		return c.carets[k-1]
+	}
+	return c.at(float32(k) / float32(max(count, 1)))
 }
 
 // at returns the X at the fraction t of the runes, in the order of the text.
@@ -301,12 +369,18 @@ func (c cluster) at(t float32) float32 {
 
 func (l Line) clusters() []cluster {
 	var out []cluster
+	ligatures := l.ligatures
 	for _, g := range l.Glyphs {
 		if n := len(out); n > 0 && out[n-1].start == g.Cluster {
 			out[n-1].right = g.pen + g.Advance
 			continue
 		}
-		out = append(out, cluster{g.Cluster, g.Runes, g.pen, g.pen + g.Advance, g.RTL})
+		c := cluster{start: g.Cluster, runes: g.Runes, left: g.pen, right: g.pen + g.Advance, rtl: g.RTL}
+		if len(ligatures) > 0 && ligatures[0].cluster == g.Cluster {
+			c.carets = ligatures[0].x
+			ligatures = ligatures[1:]
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -330,8 +404,9 @@ func (l Line) graphemeStart(index int) int {
 
 // XOf returns the X of the caret before the rune at index, in em. An index inside a
 // grapheme moves to the start of the grapheme, because a caret cannot stop in it. In a
-// ligature, XOf divides the width by the graphemes. It returns the start of the line
-// for an index before Start, and the end of the line for an index from End.
+// ligature, XOf uses the carets of the font. If the font has none, it divides the width
+// by the graphemes. It returns the start of the line for an index before Start, and the
+// end of the line for an index from End.
 func (l Line) XOf(index int) float32 {
 	clusters := l.clusters()
 	if len(clusters) == 0 {
@@ -343,7 +418,7 @@ func (l Line) XOf(index int) float32 {
 		if index >= c.start && index < c.start+c.runes {
 			stop, count := l.stopsIn(c)
 			at, _ := slices.BinarySearch(l.stops, index)
-			return c.at(float32(at-stop) / float32(max(count, 1)))
+			return c.stopX(at-stop, count)
 		}
 		if c.start < first.start {
 			first = c
@@ -374,16 +449,21 @@ func (l Line) ClusterAt(x float32) int {
 		}
 	}
 	stop, count := l.stopsIn(c)
-	width := c.right - c.left
-	if count == 0 || width <= 0 {
+	if count == 0 {
 		return l.graphemeStart(c.start)
 	}
-	t := min(max((x-c.left)/width, 0), 1)
-	if c.rtl {
-		t = 1 - t
+	nearest, distance := 0, float32(math.Inf(1))
+	for k := range count + 1 {
+		d := c.stopX(k, count) - x
+		if d < 0 {
+			d = -d
+		}
+		if d < distance {
+			nearest, distance = k, d
+		}
 	}
 	// At the end of c, the next grapheme is the next stop. It can be on the next line.
-	if at := stop + int(math.Round(float64(t)*float64(count))); at < len(l.stops) {
+	if at := stop + nearest; at < len(l.stops) {
 		return min(l.stops[at], l.End)
 	}
 	return l.End

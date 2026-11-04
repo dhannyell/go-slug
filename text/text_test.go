@@ -140,6 +140,59 @@ func TestCaretDoesNotStopInAGrapheme(t *testing.T) {
 	}
 }
 
+// The carets of the font replace the equal division. These two values differ from the
+// middle of the glyph, so a test on the middle cannot pass here.
+func TestCaretUsesTheCaretsOfTheFont(t *testing.T) {
+	for _, c := range []struct {
+		name, font, text string
+		caret            float32
+		o                Options
+	}{
+		{"LTR", "toys/GDEFCaretList3.ttf", "fi", 679.0 / 2048, Options{}},
+		{"RTL", "common/NotoSansArabic.ttf", "لا", 0.328, Options{RTL: true}},
+		{"aligned", "toys/GDEFCaretList3.ttf", "fi", 679.0 / 2048, Options{Width: 20, Align: AlignEnd}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			line := load(t, c.font).Shape(c.text, c.o)[0]
+			if len(line.Glyphs) != 1 {
+				t.Fatalf("got %d glyphs, want one ligature", len(line.Glyphs))
+			}
+			g := line.Glyphs[0]
+			if got, want := line.XOf(1), g.X+c.caret; got != want {
+				t.Errorf("the caret is at %v, want %v", got, want)
+			}
+			if got := line.ClusterAt(line.XOf(1)); got != 1 {
+				t.Errorf("the caret X returns rune %d, want 1", got)
+			}
+		})
+	}
+}
+
+// The table lists carets from left to right, and RTL text reads them in reverse. A
+// count that differs from the graphemes must not shift the text to the wrong caret.
+func TestStopXReadsTheCaretsInTextOrder(t *testing.T) {
+	carets := []float32{0.2, 0.7}
+	for _, c := range []struct {
+		name          string
+		cluster       cluster
+		count         int
+		first, second float32
+	}{
+		{"LTR", cluster{right: 1, carets: carets}, 3, 0.2, 0.7},
+		{"RTL", cluster{right: 1, rtl: true, carets: carets}, 3, 0.7, 0.2},
+		{"count differs", cluster{right: 1, carets: carets}, 4, 0.25, 0.5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.cluster.stopX(1, c.count); got != c.first {
+				t.Errorf("caret 1 is at %v, want %v", got, c.first)
+			}
+			if got := c.cluster.stopX(2, c.count); got != c.second {
+				t.Errorf("caret 2 is at %v, want %v", got, c.second)
+			}
+		})
+	}
+}
+
 // A caret inside a ligature must fall inside its glyph, and move with the text.
 func TestCaretDividesALigature(t *testing.T) {
 	line := raleway(t).Shape("xffi", Options{})[0]
