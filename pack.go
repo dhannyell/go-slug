@@ -1,6 +1,7 @@
 package slug
 
 import (
+	"errors"
 	"fmt"
 	"math"
 )
@@ -38,13 +39,20 @@ type Dirty struct {
 	Curves, Bands, Layers Range
 }
 
+// ErrPackFull reports a drawing that does not fit in Pack.MaxBytes.
+var ErrPackFull = errors.New("slug: the pack is full")
+
 // Pack holds the GPU data of many drawings. FORMAT.md describes the data.
 // Coordinates are in em space: drawing units divided by Drawing.Em.
 //
-// A Pack only grows: the data and the Entry of a drawing never change, so a
-// host can upload new data without touching old data. The zero value is an
-// empty Pack. A Pack is not safe for concurrent use.
+// A Pack is an arena. The data and the Entry of a drawing do not change until
+// Reset, so a host can upload new data without touching old data. The zero value
+// is an empty Pack. A Pack is not safe for concurrent use.
 type Pack struct {
+	// MaxBytes limits Size. 0 is no limit. A host can use it to make buffers of a
+	// fixed size. Decode does not restore it.
+	MaxBytes int
+
 	curves []float32
 	bands  []uint32
 	layers []uint32
@@ -52,12 +60,16 @@ type Pack struct {
 	entries []Entry
 	index   map[Key]int
 
-	clean Dirty // End fields only: how much the host has
+	clean      Dirty // End fields only: how much the host has
+	generation uint32
 }
 
 // Add puts d into the pack and returns its Entry. If key is already in the
 // pack, Add ignores d and returns the existing Entry. If Add returns an error,
 // the pack does not change.
+//
+// Add returns ErrPackFull when d does not fit in MaxBytes. A drawing larger than
+// MaxBytes also fails after Reset.
 func (p *Pack) Add(key Key, d Drawing) (Entry, error) {
 	if e, ok := p.Lookup(key); ok {
 		return e, nil
@@ -80,6 +92,7 @@ func (p *Pack) Add(key Key, d Drawing) (Entry, error) {
 		FirstLayer: uint32(len(p.layers) / LayerWords),
 		LayerCount: uint32(len(shapes)),
 	}
+	curves, bands, layers := len(p.curves), len(p.bands), len(p.layers)
 	for i, s := range shapes {
 		if i == 0 {
 			e.Bounds = s.Bounds
@@ -88,9 +101,35 @@ func (p *Pack) Add(key Key, d Drawing) (Entry, error) {
 		}
 		p.appendShape(s)
 	}
+	if p.MaxBytes > 0 && p.Size() > p.MaxBytes {
+		size := p.Size()
+		// appendShape writes only after these lengths, so this removes all of d.
+		p.curves, p.bands, p.layers = p.curves[:curves], p.bands[:bands], p.layers[:layers]
+		return Entry{}, fmt.Errorf("%w: needs %d bytes, and the limit is %d", ErrPackFull, size, p.MaxBytes)
+	}
 	p.register(e)
 	return e, nil
 }
+
+// Reset empties the pack and keeps its capacity. Each Entry from before Reset
+// becomes invalid: an old Entry draws the wrong shape, without an error. The next
+// TakeDirty starts at index 0, so the host writes over the old data.
+func (p *Pack) Reset() {
+	p.curves, p.bands, p.layers = p.curves[:0], p.bands[:0], p.layers[:0]
+	p.entries = p.entries[:0]
+	clear(p.index)
+	p.clean = Dirty{}
+	p.generation++
+}
+
+// Size returns the bytes of the GPU data: Curves, Bands and Layers.
+func (p *Pack) Size() int {
+	return 4 * (len(p.curves) + len(p.bands) + len(p.layers))
+}
+
+// Generation returns the number of calls to Reset. A host that keeps an Entry
+// compares this value to know when the Entry becomes invalid.
+func (p *Pack) Generation() uint32 { return p.generation }
 
 // toEm divides the coordinates of s by em. Equal values stay equal, so shared
 // endpoints and flat curves stay valid.
