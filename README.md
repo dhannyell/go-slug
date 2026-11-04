@@ -180,6 +180,15 @@ ellipsis. For the size of a line, `Line` has `Ascent`, `Descent` and `Gap`, and
 `Height` is the distance to the next baseline. For a text field, `Line.XOf` gives the X
 of a caret, and `Line.ClusterAt` gives the rune at a pointer.
 
+A game that draws the same labels in each frame can keep the results in a `ShapeCache`.
+The cache and its callers share each result, so a caller must not change it. A text
+that changes in each frame gains nothing from the cache.
+
+```go
+cache := text.NewShapeCache(4096)
+lines := cache.Shape(f, "office", text.Options{})
+```
+
 ## Limit the memory
 
 A `Pack` keeps one copy of each outline at each size, so the amount of text does not
