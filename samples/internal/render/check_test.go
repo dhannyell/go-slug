@@ -30,6 +30,7 @@ func TestGPUMatchesCPU(t *testing.T) {
 		sizes []size
 	}{
 		{"overview", []float64{0}, full},
+		{"gradients", []float64{0}, full},
 		{"text", []float64{0}, full},
 		// A deep zoom tests the precision of the matrix path: the peak is at half
 		// of the period.

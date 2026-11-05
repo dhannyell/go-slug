@@ -18,6 +18,13 @@ const SLUG_NO_ROOT = -1e10;
 
 const SLUG_EVEN_ODD = 1u;
 const SLUG_SOLID = 1u;
+const SLUG_LINEAR = 2u;
+const SLUG_RADIAL = 3u;
+const SLUG_SWEEP = 4u;
+const SLUG_REPEAT = 1u;
+const SLUG_REFLECT = 2u;
+const SLUG_STOP_WORDS = 5u;
+const SLUG_TAU = 6.283185307179586;
 
 struct SlugLayer {
     band_loc: u32,
@@ -148,6 +155,243 @@ fn slug_coverage(l: SlugLayer, coord: vec2f, pixels_per_em: vec2f) -> f32 {
     let x = slug_ray(l, h, coord, false, pixels_per_em.x);
     let y = slug_ray(l, l.n_h + v, coord, true, pixels_per_em.y);
     return slug_combine(x, y, l.rule);
+}
+
+// slug_stop_color returns the color of a stop, or of the first word of its color.
+fn slug_stop_color(word: u32) -> vec4f {
+    return vec4f(
+        bitcast<f32>(slug_band(word + 1u)),
+        bitcast<f32>(slug_band(word + 2u)),
+        bitcast<f32>(slug_band(word + 3u)),
+        bitcast<f32>(slug_band(word + 4u)),
+    );
+}
+
+// slug_segment_mean returns the premultiplied mean of a segment from f0 to f1. A straight
+// mix has a product of two lines, so its mean has a term for the curve.
+fn slug_segment_mean(a: vec4f, b: vec4f, f0: f32, f1: f32, premultiplied: bool) -> vec4f {
+    let f = (f0 + f1) * 0.5;
+    let alpha = a.a + (b.a - a.a) * f;
+    if premultiplied {
+        return vec4f(a.rgb * a.a + (b.rgb * b.a - a.rgb * a.a) * f, alpha);
+    }
+    let curve = (b.rgb - a.rgb) * (b.a - a.a) * (f1 - f0) * (f1 - f0) / 12.0;
+    return vec4f((a.rgb + (b.rgb - a.rgb) * f) * alpha + curve, alpha);
+}
+
+fn slug_premultiply(c: vec4f) -> vec4f {
+    return vec4f(c.rgb * c.a, c.a);
+}
+
+// slug_stops returns the premultiplied integral of the stops from a to b. Each segment
+// adds only its own part, so a small range keeps its precision.
+fn slug_stops(first: u32, info: u32, a: f32, b: f32) -> vec4f {
+    let premultiplied = ((info >> 24u) & 1u) != 0u;
+    var lo = bitcast<f32>(slug_band(first));
+    var lo_color = slug_stop_color(first);
+    var sum = vec4f(0.0);
+    if a < lo {
+        sum += slug_premultiply(lo_color) * (min(b, lo) - a);
+    }
+    for (var i = 1u; i < (info & 0xFFFFu); i++) {
+        let word = first + i * SLUG_STOP_WORDS;
+        let hi = bitcast<f32>(slug_band(word));
+        let hi_color = slug_stop_color(word);
+        let x0 = max(a, lo);
+        let x1 = min(b, hi);
+        if x1 > x0 {
+            // x1 is over x0, so the two offsets differ.
+            let f0 = (x0 - lo) / (hi - lo);
+            let f1 = (x1 - lo) / (hi - lo);
+            sum += slug_segment_mean(lo_color, hi_color, f0, f1, premultiplied) * (x1 - x0);
+        }
+        lo = hi;
+        lo_color = hi_color;
+    }
+    if b > lo {
+        sum += slug_premultiply(lo_color) * (b - max(a, lo));
+    }
+    return sum;
+}
+
+// slug_unit returns the integral of the part from a to b of the unit that starts at n.
+fn slug_unit(first: u32, info: u32, n: f32, a: f32, b: f32) -> vec4f {
+    if ((info >> 16u) & 0xFFu) == SLUG_REFLECT && n - 2.0 * floor(n * 0.5) != 0.0 {
+        return slug_stops(first, info, 1.0 - b, 1.0 - a);
+    }
+    return slug_stops(first, info, a, b);
+}
+
+// slug_spread returns the premultiplied integral of the gradient from lo to hi, with spread.
+fn slug_spread(first: u32, info: u32, lo: f32, hi: f32) -> vec4f {
+    let spread = (info >> 16u) & 0xFFu;
+    if spread != SLUG_REPEAT && spread != SLUG_REFLECT {
+        return slug_stops(first, info, lo, hi);
+    }
+    let n0 = floor(lo);
+    let n1 = floor(hi);
+    if n0 == n1 {
+        return slug_unit(first, info, n0, lo - n0, hi - n0);
+    }
+    var sum = slug_unit(first, info, n0, lo - n0, 1.0) + slug_unit(first, info, n1, 0.0, hi - n1);
+    if n1 - n0 > 1.0 {
+        sum += slug_stops(first, info, 0.0, 1.0) * (n1 - n0 - 1.0);
+    }
+    return sum;
+}
+
+// slug_radial_pixel returns the t of a pixel, the width of its t range, and the part of
+// the pixel inside the cone. The t is the larger t whose circle has a radius of at least
+// 0 and passes through at. du and dv are the change of at for one pixel.
+fn slug_radial_pixel(at: vec2f, du: vec2f, dv: vec2f, r0: f32, r1: f32, cx: f32) -> vec3f {
+    let dr = r1 - r0;
+    let a = cx * cx - dr * dr;
+    var b = at.x * cx + r0 * dr;
+    let c = dot(at, at) - r0 * r0;
+    let db = length(vec2f(du.x, dv.x) * cx);
+
+    var t: f32;
+    var limit: f32; // the largest width, near the border of the cone
+    var cover = 1.0;
+    if abs(a) < SLUG_NEAR_ZERO {
+        // One root, and the border of the cone is the line b = 0.
+        let dir = select(1.0, -1.0, dr < 0.0);
+        let side = b * dir;
+        cover = saturate(0.5 + side / db);
+        if cover <= 0.0 {
+            return vec3f(0.0);
+        }
+        if side < 1e-6 {
+            b = 1e-6 * dir;
+        }
+        t = c * 0.5 / b;
+        limit = 1e30;
+    } else {
+        var d = b * b - a * c;
+        // The change of d for one pixel.
+        let g = length(2.0 * vec2f(b * cx * du.x - a * dot(at, du), b * cx * dv.x - a * dot(at, dv)));
+        if a > 0.0 {
+            // Nested circles fill the plane, so only a cone has a border.
+            if g > 0.0 {
+                cover = saturate(0.5 + d / g);
+            } else if d < 0.0 {
+                cover = 0.0;
+            }
+            if cover <= 0.0 {
+                return vec3f(0.0);
+            }
+        }
+        d = max(d, 0.0);
+        let s = sqrt(d);
+        let t1 = max((b + s) / a, (b - s) / a);
+        let t2 = min((b + s) / a, (b - s) / a);
+        t = t1;
+        if r0 + t1 * dr < 0.0 {
+            if r0 + t2 * dr < 0.0 {
+                return vec3f(0.0);
+            }
+            t = t2;
+        }
+        limit = (sqrt(d + g * 0.5) - sqrt(max(d - g * 0.5, 0.0)) + db) / abs(a);
+    }
+
+    // The gradient of t is (at - center) / (b - a*t). It has no limit at the border.
+    var w = limit;
+    let slope = abs(b - a * t);
+    if slope > 0.0 {
+        let q = vec2f(at.x - t * cx, at.y);
+        w = min(limit, length(vec2f(dot(q, du), dot(q, dv))) / slope);
+    }
+    return vec3f(t, w, cover);
+}
+
+// slug_sweep_t measures the angle from start in the direction of end, up to one turn.
+fn slug_sweep_t(at: vec2f, start: f32, end: f32) -> f32 {
+    // WGSL does not define atan2(0, 0).
+    var angle = -start;
+    if at.x != 0.0 || at.y != 0.0 {
+        angle = atan2(at.y, at.x) - start;
+    }
+    var span = end - start;
+    if span < 0.0 {
+        angle = -angle;
+        span = -span;
+    }
+    angle -= SLUG_TAU * floor(angle / SLUG_TAU);
+    return angle / span;
+}
+
+// slug_paint returns the straight color of layer i at coord, in em space, filtered over
+// one pixel. pixels_per_em is the value of slug_coverage. current is the color of a
+// CurrentColor layer. A host that does not call it draws a gradient with its own color.
+//
+// The color is the mean of the stops over the t range of the pixel, in closed form. A
+// jump of color then has no steps, and the cost does not depend on the jump.
+fn slug_paint(i: u32, l: SlugLayer, coord: vec2f, pixels_per_em: vec2f, current: vec4f) -> vec4f {
+    if l.kind == SLUG_SOLID {
+        return l.color;
+    }
+    if l.kind < SLUG_LINEAR || l.kind > SLUG_SWEEP {
+        return current;
+    }
+    let r = i * 24u;
+    let first = slug_layer(r + 12u);
+    let info = slug_layer(r + 13u);
+    let a = slug_layer_f32(r + 14u);
+    let b = slug_layer_f32(r + 15u);
+    let cx = slug_layer_f32(r + 22u);
+    let m0 = vec3f(slug_layer_f32(r + 16u), slug_layer_f32(r + 18u), slug_layer_f32(r + 20u));
+    let m1 = vec3f(slug_layer_f32(r + 17u), slug_layer_f32(r + 19u), slug_layer_f32(r + 21u));
+
+    let at = vec2f(dot(m0, vec3f(coord, 1.0)), dot(m1, vec3f(coord, 1.0)));
+    let ems = 1.0 / pixels_per_em;
+    // The change of at for one pixel in x, and for one pixel in y.
+    let du = vec2f(m0.x, m1.x) * ems.x;
+    let dv = vec2f(m0.y, m1.y) * ems.y;
+
+    var t = at.x;
+    var w = length(vec2f(du.x, dv.x));
+    var period = 0.0;
+    var cover = 1.0;
+    if l.kind == SLUG_RADIAL {
+        let p = slug_radial_pixel(at, du, dv, a, b, cx);
+        t = p.x;
+        w = p.y;
+        cover = p.z;
+        if cover <= 0.0 {
+            return vec4f(0.0);
+        }
+    } else if l.kind == SLUG_SWEEP {
+        let span = abs(b - a);
+        t = slug_sweep_t(at, a, b);
+        period = SLUG_TAU / span;
+        w = period;
+        let r2 = dot(at, at);
+        if r2 > 0.0 {
+            w = length(vec2f(at.x * du.y - at.y * du.x, at.x * dv.y - at.y * dv.x)) / r2 / span;
+        }
+    }
+
+    // The range keeps a width at each scale of t.
+    w = max(w, abs(t) / 2097152.0 + 1e-20);
+    var lo = t - w * 0.5;
+    var hi = t + w * 0.5;
+    var sum: vec4f;
+    if period > 0.0 && w >= period {
+        lo = 0.0;
+        hi = period;
+        sum = slug_spread(first, info, lo, hi);
+    } else if period > 0.0 && lo < 0.0 { // the seam of a sweep
+        sum = slug_spread(first, info, lo + period, period) + slug_spread(first, info, 0.0, hi);
+    } else if period > 0.0 && hi > period {
+        sum = slug_spread(first, info, lo, period) + slug_spread(first, info, 0.0, hi - period);
+    } else {
+        sum = slug_spread(first, info, lo, hi);
+    }
+    if sum.a <= 0.0 {
+        return vec4f(0.0);
+    }
+    return vec4f(sum.rgb / sum.a, sum.a / (hi - lo) * cover);
 }
 
 // slug_dilate moves a corner of a layer box out by half of fwidth(coord): a

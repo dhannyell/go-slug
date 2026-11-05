@@ -131,7 +131,7 @@ func TestRasterBandsDoNotChangeCoverage(t *testing.T) {
 			ems := emPerPixel(inverse)
 			ppe := Point{1 / ems.X, 1 / ems.Y}
 			bounds := image.Rect(0, 0, 64, 110)
-			p.eachPixel(l, view, inverse, bounds, func(x, y int, got float32) {
+			p.eachPixel(l, view, inverse, bounds, func(x, y int, _ Point, got float32) {
 				coord := inverse.Apply(Point{float32(x) + 0.5, float32(y) + 0.5})
 				xcov, xwgt := p.rayCoverage(byX, coord, false, ppe.X)
 				ycov, ywgt := p.rayCoverage(byY, coord, true, ppe.Y)
@@ -361,5 +361,223 @@ func TestRasterRejectsBadArguments(t *testing.T) {
 	e.LayerCount++
 	if err := p.Rasterize(e, pixelView, color, rgba); err == nil {
 		t.Errorf("Rasterize outside the pack: err = nil")
+	}
+}
+
+var (
+	black = [4]float32{0, 0, 0, 1}
+	white = [4]float32{1, 1, 1, 1}
+	ramp  = []Stop{{0, black}, {1, white}}
+)
+
+// gradientImage draws a square of 32 pixels with the paint.
+func gradientImage(t *testing.T, paint Paint) *image.RGBA {
+	t.Helper()
+	var p Pack
+	e := mustAdd(t, &p, 1, Drawing{Em: rasterEm, Layers: []Layer{{Path: squarePath(0, 0, 32), Paint: paint}}})
+	dst := image.NewRGBA(image.Rect(0, 0, 32, 32))
+	if err := p.Rasterize(e, pixelView, [4]float32{1, 0, 0, 1}, dst); err != nil {
+		t.Fatal(err)
+	}
+	return dst
+}
+
+func withSpread(p Paint, s Spread) Paint {
+	p.Gradient.Spread = s
+	return p
+}
+
+func TestGradientValues(t *testing.T) {
+	line := LinearPaint(Point{8, 0}, Point{24, 0}, ramp...)
+	short := func() Paint { return LinearPaint(Point{0, 0}, Point{8, 0}, ramp...) }
+	cases := []struct {
+		name  string
+		paint Paint
+		x, y  int
+		want  float64 // the gray value of the pixel, from 0 to 1
+	}{
+		{"linear", line, 12, 3, 4.5 / 16},
+		{"pad before", line, 2, 3, 0},
+		{"pad after", line, 30, 3, 1},
+		{"repeat", withSpread(short(), Repeat), 12, 3, 4.5 / 8},
+		{"reflect", withSpread(short(), Reflect), 12, 3, 3.5 / 8},
+		{"radial", RadialPaint(Point{16, 16}, 0, Point{16, 16}, 16, ramp...), 24, 16, 8.53 / 16},
+		{"sweep half", SweepPaint(Point{16, 16}, 0, 2*math.Pi, ramp...), 4, 16, 0.5},
+		{"sweep from below", SweepPaint(Point{16, 16}, -math.Pi/2, 3*math.Pi/2, ramp...), 4, 16, 0.75},
+		{"sweep backward", SweepPaint(Point{16, 16}, 2*math.Pi, 0, ramp...), 16, 28, 0.75},
+		{"hard stop low", LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0.5, black}, Stop{0.5, white}), 15, 3, 0},
+		{"hard stop high", LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0.5, black}, Stop{0.5, white}), 16, 3, 1},
+		{"hard stop inside", LinearPaint(Point{0, 0}, Point{33, 0}, Stop{0.5, black}, Stop{0.5, white}), 16, 3, 0.5},
+		{"repeat seam", withSpread(LinearPaint(Point{0, 0}, Point{8.5, 0}, ramp...), Repeat), 8, 3, 0.5},
+		{"sweep seam", SweepPaint(Point{16, 16.5}, 0, 2*math.Pi, ramp...), 24, 16, 0.5},
+		{"stripes under a pixel", withSpread(LinearPaint(Point{0, 0}, Point{0.25, 0}, ramp...), Repeat), 9, 3, 0.5},
+		{"reflect stripes under a pixel", withSpread(LinearPaint(Point{0, 0}, Point{0.25, 0}, ramp...), Reflect), 9, 3, 0.5},
+		{"no direction", LinearPaint(Point{8, 8}, Point{8, 8}, ramp...), 3, 3, 1},
+		{"one stop", RadialPaint(Point{8, 8}, 0, Point{8, 8}, 8, Stop{0, white}), 3, 3, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := float64(gradientImage(t, c.paint).RGBAAt(c.x, c.y).R) / 255
+			if math.Abs(got-c.want) > 0.02 {
+				t.Errorf("gray = %.3f, want %.3f", got, c.want)
+			}
+		})
+	}
+}
+
+// The definition of two circles is the oracle: the pixel is on the circle of its t.
+func TestRadialGradientOnItsCircle(t *testing.T) {
+	c0, c1 := Point{6, 16}, Point{22, 16}
+	const r0, r1 = 1, 9
+	img := gradientImage(t, RadialPaint(c0, r0, c1, r1, ramp...))
+	transparent, painted := 0, 0
+	for y := range 32 {
+		for x := range 32 {
+			c := img.RGBAAt(x, y)
+			if c.A == 0 {
+				transparent++
+				continue
+			}
+			if c.A != 255 || c.R < 26 || c.R > 229 {
+				continue // the filter mixes a border with transparent, and a value near a pad with the pad
+			}
+			painted++
+			v := float64(c.R) / 255
+			cx := float64(c0.X) + v*float64(c1.X-c0.X)
+			dist := math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-16)
+			if r := r0 + v*(r1-r0); math.Abs(dist-r) > 0.1 {
+				t.Fatalf("pixel %d,%d has t %.3f: distance %.2f, radius %.2f", x, y, v, dist, r)
+			}
+		}
+	}
+	if transparent == 0 || painted == 0 {
+		t.Errorf("%d pixels are outside the cone and %d pixels are inside", transparent, painted)
+	}
+}
+
+func TestGradientAlphaMix(t *testing.T) {
+	red, clearBlue := [4]float32{1, 0, 0, 1}, [4]float32{0, 0, 1, 0}
+	straight := LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0, red}, Stop{1, clearBlue})
+	premultiplied := LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0, red}, Stop{1, clearBlue})
+	premultiplied.Gradient.Premultiplied = true
+
+	// The pixel at 15 is nearly half of the way. dst is premultiplied.
+	a := gradientImage(t, straight).RGBAAt(15, 3)
+	if a.B < 55 {
+		t.Errorf("the straight mix has no blue: %v", a)
+	}
+	b := gradientImage(t, premultiplied).RGBAAt(15, 3)
+	if b.B != 0 || b.R != b.A {
+		t.Errorf("the premultiplied mix gives color to a transparent stop: %v", b)
+	}
+}
+
+// The gradient is in the space of the path, so both transforms move it with the shape.
+func TestGradientFollowsTransforms(t *testing.T) {
+	scale := Affine{2, 0, 0, 2, 0, 0}
+	shift := Affine{1, 0, 0, 1, 8, 0}
+	var p Pack
+	path := squarePath(0, 0, 16)
+	e := mustAdd(t, &p, 1, Drawing{Em: rasterEm, Layers: []Layer{{
+		Path: path, Transform: &scale, Paint: LinearPaint(Point{0, 0}, Point{16, 0}, ramp...),
+	}}})
+	moved := LinearPaint(Point{0, 0}, Point{8, 0}, ramp...)
+	moved.Gradient.Transform = &shift
+	f := mustAdd(t, &p, 2, Drawing{Em: rasterEm, Layers: []Layer{{Path: path, Paint: moved}}})
+	cases := []struct {
+		e    Entry
+		x    int
+		want float64
+	}{{e, 24, 24.5 / 32}, {f, 12, 4.5 / 8}, {f, 4, 0}}
+	for _, c := range cases {
+		dst := image.NewRGBA(image.Rect(0, 0, 32, 32))
+		if err := p.Rasterize(c.e, pixelView, white, dst); err != nil {
+			t.Fatal(err)
+		}
+		if got := float64(dst.RGBAAt(c.x, 3).R) / 255; math.Abs(got-c.want) > 0.02 {
+			t.Errorf("entry %v at x=%d: gray %.3f, want %.3f", c.e.Key, c.x, got, c.want)
+		}
+	}
+}
+
+func TestStrokeKeepsGradient(t *testing.T) {
+	d, err := Drawing{Em: rasterEm, Layers: []Layer{{
+		Path: squarePath(8, 8, 16), Paint: LinearPaint(Point{0, 0}, Point{32, 0}, ramp...),
+	}}}.Stroke(Stroke{Width: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p Pack
+	e := mustAdd(t, &p, 1, d)
+	dst := image.NewRGBA(image.Rect(0, 0, 32, 32))
+	if err := p.Rasterize(e, pixelView, [4]float32{1, 0, 0, 1}, dst); err != nil {
+		t.Fatal(err)
+	}
+	left, right := dst.RGBAAt(8, 16), dst.RGBAAt(24, 16)
+	if left.A != 255 || right.A != 255 || left.R >= right.R || left.G != left.R {
+		t.Errorf("the line has %v at the left and %v at the right", left, right)
+	}
+}
+
+func TestInvalidGradients(t *testing.T) {
+	singular := Affine{}
+	flat := LinearPaint(Point{0, 0}, Point{1, 0}, ramp...)
+	flat.Gradient.Transform = &singular
+	cases := map[string]Paint{
+		"no gradient":  {Kind: LinearGradient},
+		"unknown kind": {Kind: SweepGradient + 1, Gradient: &Gradient{Stops: ramp}},
+		"no stops":     LinearPaint(Point{0, 0}, Point{1, 0}),
+		"falling":      LinearPaint(Point{0, 0}, Point{1, 0}, Stop{1, black}, Stop{0, white}),
+		"negative":     RadialPaint(Point{0, 0}, -1, Point{1, 0}, 1, ramp...),
+		"singular":     flat,
+		"spread":       withSpread(LinearPaint(Point{0, 0}, Point{1, 0}, ramp...), Reflect+1),
+	}
+	for name, paint := range cases {
+		var p Pack
+		_, err := p.Add(Key{ID: 1}, Drawing{Em: rasterEm, Layers: []Layer{{Path: squarePath(0, 0, 8), Paint: paint}}})
+		if !errors.Is(err, ErrInvalidPaint) {
+			t.Errorf("%s: err = %v, want ErrInvalidPaint", name, err)
+		}
+		if p.Size() != 0 {
+			t.Errorf("%s: the pack has %d bytes", name, p.Size())
+		}
+	}
+}
+
+// The edge of a circle has each direction. A test of two samples misses some of them.
+func TestGradientEdgeIsSmoothInEachDirection(t *testing.T) {
+	const radius = 10
+	img := gradientImage(t, RadialPaint(Point{16, 16}, 0, Point{16, 16}, radius*2, Stop{0.5, black}, Stop{0.5, white}))
+	checked := 0
+	for y := range 32 {
+		for x := range 32 {
+			dist := math.Hypot(float64(x)+0.5-16, float64(y)+0.5-16)
+			if math.Abs(dist-radius) > 0.1 {
+				continue
+			}
+			checked++
+			if v := img.RGBAAt(x, y).R; v == 0 || v == 255 {
+				t.Errorf("pixel %d,%d on the edge has gray %d", x, y, v)
+			}
+		}
+	}
+	if checked < 8 {
+		t.Errorf("the edge has %d pixels", checked)
+	}
+}
+
+// The border of a cone is an edge to transparent, so it needs a partial alpha.
+func TestRadialConeBorderIsSmooth(t *testing.T) {
+	img := gradientImage(t, RadialPaint(Point{4, 16}, 0, Point{20, 16}, 8, ramp...))
+	partial := 0
+	for y := range 32 {
+		for x := range 32 {
+			if a := img.RGBAAt(x, y).A; a > 0 && a < 255 {
+				partial++
+			}
+		}
+	}
+	if partial == 0 {
+		t.Error("the border of the cone has no partial alpha")
 	}
 }

@@ -42,6 +42,7 @@ const (
 	sourceHall
 	sourceNewsHead
 	sourceNewsTitle
+	sourceGradient
 )
 
 // Item places one entry of the pack.
@@ -74,7 +75,7 @@ type Scene struct {
 }
 
 // Names lists the scenes that New can build.
-var Names = []string{"overview", "zoom", "perspective", "text", "hall", "dive", "news"}
+var Names = []string{"overview", "zoom", "perspective", "text", "hall", "dive", "news", "gradients"}
 
 // New builds the scene with the given name.
 func New(name string) (*Scene, error) {
@@ -98,6 +99,9 @@ func New(name string) (*Scene, error) {
 		return s, s.dive()
 	case "news":
 		return s, s.news()
+	case "gradients":
+		s.frame = s.whole(still)
+		return s, s.gradients()
 	}
 	return nil, fmt.Errorf("scene: no scene %q", name)
 }
