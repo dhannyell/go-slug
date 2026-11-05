@@ -33,16 +33,22 @@ func (f *Font) Styled(s Style, source uint32) *Font {
 	if source == f.source {
 		panic("text: Styled needs a different source")
 	}
+	return f.variant(source, s, f.palette)
+}
+
+// variant returns a font with the outlines of f and another style or palette.
+func (f *Font) variant(source uint32, s Style, palette int) *Font {
 	// A new face, because a Family finds the font of a run by its face.
-	styled := &Font{
+	v := &Font{
 		outlines: f.outlines,
 		face:     gofont.NewFace(f.face.Font),
 		source:   source,
 		base:     f.parsed(),
 		style:    s,
+		palette:  palette,
 	}
-	styled.self.fonts = []*Font{styled}
-	return styled
+	v.self.fonts = []*Font{v}
+	return v
 }
 
 // parsed returns the font without a style.

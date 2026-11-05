@@ -376,7 +376,9 @@ License (see [LICENSES/Slug-MIT.txt](LICENSES/Slug-MIT.txt)). The Slug patent ha
 dedicated to the public domain.
 
 The `text` scene uses the Amiri font, under the SIL Open Font License (see
-[samples/internal/scene/fonts/OFL.txt](samples/internal/scene/fonts/OFL.txt)).
+[samples/internal/scene/fonts/OFL.txt](samples/internal/scene/fonts/OFL.txt)). The `emoji` scene uses 16 glyphs of
+Noto Color Emoji, under the same license (see
+[samples/internal/scene/fonts/NotoColorEmoji-OFL.txt](samples/internal/scene/fonts/NotoColorEmoji-OFL.txt)).
 
 ## License
 

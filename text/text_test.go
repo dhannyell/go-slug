@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/go-text/typesetting-utils/opentype"
+	"github.com/go-text/typesetting/font/opentype/tables"
 
 	slug "github.com/dhannyell/go-slug"
 )
@@ -740,4 +741,68 @@ func BenchmarkShapeCache(b *testing.B) {
 			c.Shape(f, label, Options{})
 		}
 	})
+}
+
+// A color glyph draws its COLR layers, and its gradients mix in linear light.
+func TestColorGlyphHasItsLayers(t *testing.T) {
+	f := load(t, "color/NotoColorEmoji-Regular.ttf")
+	g := f.Shape("😀", Options{})[0].Glyphs[0]
+	var pack slug.Pack
+	if _, err := f.Add(&pack, g); err != nil {
+		t.Fatal(err)
+	}
+	d, approx, ok, err := f.colorDrawing(g.ID)
+	if !ok || err != nil || approx != 0 || len(d.Layers) < 2 {
+		t.Fatalf("color %v, error %v, %d layers, %d approximations", ok, err, len(d.Layers), approx)
+	}
+	gradients := 0
+	for _, l := range d.Layers {
+		if l.Paint.Kind == slug.CurrentColor {
+			t.Error("a layer has the foreground color")
+		}
+		if gr := l.Paint.Gradient; gr != nil {
+			gradients++
+			if gr.Space != slug.LinearSRGB || !gr.Premultiplied {
+				t.Errorf("a gradient mixes in space %d, premultiplied %v", gr.Space, gr.Premultiplied)
+			}
+		}
+	}
+	if gradients == 0 {
+		t.Error("the face has no gradient")
+	}
+}
+
+// COLR sets offset 1 on the line through p1 parallel to p0p2. The core needs the
+// point on the normal from p0.
+func TestColorLinearGradientUsesP2(t *testing.T) {
+	var w colorWalker
+	line := tables.ColorLine{ColorStops: []tables.ColorStop{{StopOffset: 1 << 14, Alpha: 1 << 14}}}
+	p, _ := w.paintOf(tables.PaintLinearGradient{ColorLine: line, X1: 100, X2: 100, Y2: 100}, slug.Identity())
+	if p.Gradient == nil || p.Gradient.P1 != (slug.Point{X: 50, Y: -50}) {
+		t.Errorf("the paint is %+v", p)
+	}
+	p, _ = w.paintOf(tables.PaintLinearGradient{ColorLine: line, X1: 100, X2: 100}, slug.Identity())
+	if p != none {
+		t.Errorf("parallel lines give %+v, not an empty paint", p)
+	}
+}
+
+func TestPaletteChangesTheColors(t *testing.T) {
+	f := load(t, "color/CoralPixels-Regular.ttf")
+	other, err := f.Palette(1, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := f.Shape("A", Options{})[0].Glyphs[0]
+	a, _, _, _ := f.colorDrawing(g.ID)
+	b, _, _, _ := other.colorDrawing(g.ID)
+	if len(a.Layers) == 0 || len(a.Layers) != len(b.Layers) {
+		t.Fatalf("the palettes give %d and %d layers", len(a.Layers), len(b.Layers))
+	}
+	if slices.EqualFunc(a.Layers, b.Layers, func(x, y slug.Layer) bool { return x.Paint == y.Paint }) {
+		t.Error("palette 1 has the colors of palette 0")
+	}
+	if _, err := f.Palette(f.Palettes(), 9); err == nil {
+		t.Error("a palette past the end has no error")
+	}
 }
