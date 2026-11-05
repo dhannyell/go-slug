@@ -31,6 +31,7 @@ func TestGPUMatchesCPU(t *testing.T) {
 	}{
 		{"overview", []float64{0}, full},
 		{"gradients", []float64{0}, full},
+		{"emoji", []float64{0}, full},
 		{"text", []float64{0}, full},
 		// A deep zoom tests the precision of the matrix path: the peak is at half
 		// of the period.
@@ -201,7 +202,7 @@ func BenchmarkFrame(b *testing.B) {
 	for _, c := range []struct {
 		scene string
 		at    float64
-	}{{"hall", 0}, {"hall", scene.HallPeriod / 2}, {"dive", 0}, {"dive", scene.DivePeriod / 2}, {"news", 0}} {
+	}{{"hall", 0}, {"hall", scene.HallPeriod / 2}, {"dive", 0}, {"dive", scene.DivePeriod / 2}, {"news", 0}, {"emoji", 0}} {
 		s, err := scene.New(c.scene)
 		if err != nil {
 			b.Fatal(err)
@@ -213,6 +214,9 @@ func BenchmarkFrame(b *testing.B) {
 		defer r.Release()
 		frame := s.Frame(c.at, w, h)
 		for _, m := range modes {
+			if m.mode != Normal && !s.Versus {
+				continue // an atlas has one color for each glyph
+			}
 			once, err := r.drawing(m.mode)
 			if err != nil {
 				b.Fatal(err)

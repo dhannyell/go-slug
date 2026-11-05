@@ -391,7 +391,18 @@ fn slug_paint(i: u32, l: SlugLayer, coord: vec2f, pixels_per_em: vec2f, current:
     if sum.a <= 0.0 {
         return vec4f(0.0);
     }
-    return vec4f(sum.rgb / sum.a, sum.a / (hi - lo) * cover);
+    var rgb = sum.rgb / sum.a;
+    if ((info >> 25u) & 1u) != 0u {
+        rgb = slug_to_srgb(rgb);
+    }
+    return vec4f(rgb, sum.a / (hi - lo) * cover);
+}
+
+// slug_to_srgb is the transfer function of sRGB, from linear light.
+fn slug_to_srgb(v: vec3f) -> vec3f {
+    let low = v * 12.92;
+    let high = 1.055 * pow(max(v, vec3f(0.0031308)), vec3f(1.0 / 2.4)) - 0.055;
+    return select(high, low, v <= vec3f(0.0031308));
 }
 
 // slug_dilate moves a corner of a layer box out by half of fwidth(coord): a

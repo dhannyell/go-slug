@@ -170,8 +170,16 @@ type Stop struct {
 	Color [4]float32
 }
 
-// Gradient is a color that changes over a layer. Colors mix in sRGB. Use LinearPaint,
-// RadialPaint or SweepPaint to make one. A gradient without a direction, such as a
+// ColorSpace is the space in which the stops of a gradient mix.
+type ColorSpace uint8
+
+const (
+	SRGB       ColorSpace = iota // the default; SVG and CSS mix here
+	LinearSRGB                   // linear light; COLR fonts mix here
+)
+
+// Gradient is a color that changes over a layer. Use LinearPaint, RadialPaint or
+// SweepPaint to make one. A gradient without a direction, such as a
 // line of length 0, draws the color of its last stop.
 type Gradient struct {
 	Stops  []Stop
@@ -179,6 +187,8 @@ type Gradient struct {
 	// Premultiplied mixes the stops with RGB multiplied by alpha, so a transparent
 	// stop gives no color to its neighbor.
 	Premultiplied bool
+	// Space is the space in which the stops mix. The result is sRGB in both spaces.
+	Space ColorSpace
 	// Transform maps the space of the fields below to drawing units, before
 	// Layer.Transform. nil means identity.
 	Transform *Affine

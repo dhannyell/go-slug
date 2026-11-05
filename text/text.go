@@ -49,6 +49,7 @@ type Font struct {
 	self     Family         // this font alone
 	base     *Font          // the parsed font of a styled font; nil for a parsed font
 	style    Style
+	palette  int // the CPAL palette of the color glyphs
 }
 
 // Parse parses a TrueType or OpenType font. source is the Key.Source of the
@@ -447,7 +448,8 @@ func (l Line) ClusterAt(x float32) int {
 }
 
 // Add puts the outline of g into p, and returns its Entry. A glyph without
-// contours, such as a space, has no layers. It reads the outline from g.Font, so the
+// contours, such as a space, has no layers. A color glyph of the COLR table has a
+// layer for each color, and the foreground is slug.CurrentColor. It reads the outline from g.Font, so the
 // result is correct also if f is another font of the Family. If g.Font and f differ
 // only in style, Add uses the style of f, so one line can draw twice: fill and outline.
 func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
@@ -458,11 +460,18 @@ func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
 	if e, ok := p.Lookup(key); ok {
 		return e, nil
 	}
-	outline, err := f.outlines.Glyph(g.ID)
+	drawing, _, color, err := f.colorDrawing(g.ID)
 	if err != nil {
-		return slug.Entry{}, fmt.Errorf("text: %w", err)
+		return slug.Entry{}, err
 	}
-	drawing, err := f.style.apply(outline.Drawing)
+	if !color {
+		outline, err := f.outlines.Glyph(g.ID)
+		if err != nil {
+			return slug.Entry{}, fmt.Errorf("text: %w", err)
+		}
+		drawing = outline.Drawing
+	}
+	drawing, err = f.style.apply(drawing)
 	if err != nil {
 		return slug.Entry{}, fmt.Errorf("text: %w", err)
 	}

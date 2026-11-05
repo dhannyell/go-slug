@@ -105,6 +105,9 @@ func (g *Gradient) check() error {
 	if len(g.Stops) == 0 || len(g.Stops) > maxStops {
 		return fmt.Errorf("%w: a gradient has %d stops", ErrInvalidPaint, len(g.Stops))
 	}
+	if g.Space > LinearSRGB {
+		return fmt.Errorf("%w: unknown color space %d", ErrInvalidPaint, g.Space)
+	}
 	if g.Spread > Reflect {
 		return fmt.Errorf("%w: unknown spread %d", ErrInvalidPaint, g.Spread)
 	}
@@ -126,6 +129,7 @@ type layerGradient struct {
 	count         uint32
 	spread        Spread
 	premultiplied bool
+	linear        bool // the stops are in linear light
 }
 
 // gradientColor returns the straight color of a gradient layer at coord, filtered over
@@ -178,7 +182,28 @@ func (p *Pack) gradientColor(kind PaintKind, g *layerGradient, coord, ems Point)
 	if sum[3] <= 0 {
 		return [4]float32{}
 	}
-	return [4]float32{sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3], sum[3] / (hi - lo) * cover}
+	c := [4]float32{sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3], sum[3] / (hi - lo) * cover}
+	if g.linear {
+		for i := range 3 {
+			c[i] = toSRGB(c[i])
+		}
+	}
+	return c
+}
+
+// toLinear and toSRGB are the transfer function of sRGB.
+func toLinear(v float32) float32 {
+	if v <= 0.04045 {
+		return v / 12.92
+	}
+	return float32(math.Pow(float64((v+0.055)/1.055), 2.4))
+}
+
+func toSRGB(v float32) float32 {
+	if v <= 0.0031308 {
+		return v * 12.92
+	}
+	return 1.055*float32(math.Pow(float64(v), 1/2.4)) - 0.055
 }
 
 // addSpread adds the premultiplied integral of the gradient from lo to hi, with spread.
