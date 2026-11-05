@@ -43,7 +43,8 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - **CPU copy of the shader.** `Pack.Rasterize` draws without a GPU. The tests use it as
   the oracle of the WGSL code.
 - **Optional text shaping.** The [`text`](text) module adds kerning, ligatures,
-  right-to-left text, line breaks, alignment, line metrics and caret positions.
+  right-to-left text, line breaks, alignment, font fallback, styled spans, line metrics
+  and caret positions.
 
 ## Install
 
@@ -173,12 +174,37 @@ for _, line := range f.Shape("office", text.Options{}) {
 }
 ```
 
-`Shape` uses one font for all of the string. A font fallback is the work of the caller.
+`Font.Shape` uses one font for all of the string. A `Family` adds a fallback: each rune
+uses the first font that has it. Give each font its own source in `Parse`.
+
+```go
+fam := text.NewFamily(latin, arabic, cjk)
+for _, line := range fam.Shape("Hello سلام 世界", text.Options{}) {
+	for _, g := range line.Glyphs {
+		entry, err := g.Font.Add(&pack, g)
+		// Draw entry with g.At(size).
+	}
+}
+```
+
+A `Span` is a part of a text with its own `Family` and `Scale`. Line breaks, bidi and
+alignment see one text. `Glyph.Span` gives the index of the span, so the caller can
+choose a color. A ligature does not cross two spans, but the shape of a joining script
+does.
+
+```go
+lines := fam.ShapeSpans([]text.Span{
+	{Text: "Hit points: "},
+	{Text: "1234", Family: bold, Scale: 1.5},
+}, text.Options{})
+```
 
 `Options` also has the width of a line, the alignment, a limit on the lines and an
 ellipsis. For the size of a line, `Line` has `Ascent`, `Descent` and `Gap`, and
-`Height` is the distance to the next baseline. For a text field, `Line.XOf` gives the X
-of a caret, and `Line.ClusterAt` gives the rune at a pointer.
+`Height` is the distance to the next baseline. A line holds the metrics of its primary
+font and of all its runs. For a text field, `Line.XOf` gives the X of a caret,
+`Line.ClusterAt` gives the rune at a pointer, and `Line.NextStop` and `Line.PrevStop`
+move the caret over one grapheme.
 
 A game that draws the same labels in each frame can keep the results in a `ShapeCache`.
 The cache and its callers share each result, so a caller must not change it. A text
@@ -187,6 +213,7 @@ that changes in each frame gains nothing from the cache.
 ```go
 cache := text.NewShapeCache(4096)
 lines := cache.Shape(f, "office", text.Options{})
+spans := cache.ShapeSpans(fam, []text.Span{{Text: "office"}}, text.Options{})
 ```
 
 ## Limit the memory
