@@ -1,5 +1,5 @@
-// Package text turns a string into positioned glyphs of one font, with kerning,
-// ligatures, right-to-left text, line breaks and alignment. HarfBuzz rules come
+// Package text turns a string into positioned glyphs, with kerning, ligatures,
+// right-to-left text, line breaks, alignment, font fallback and styled spans. HarfBuzz rules come
 // from go-text/typesetting, so this package is a separate module: the slug core
 // does not depend on a shaper.
 //
@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 
 	"github.com/go-text/typesetting/di"
 	gofont "github.com/go-text/typesetting/font"
@@ -47,6 +46,7 @@ type Font struct {
 	wrapper  shaping.LineWrapper
 	breaks   segmenter.Segmenter
 	carets   *harfbuzz.Font // made at the first ligature; reads the GDEF table
+	self     Family         // this font alone
 }
 
 // Parse parses a TrueType or OpenType font. source is the Key.Source of the
@@ -60,7 +60,9 @@ func Parse(data []byte, source uint32) (*Font, error) {
 	if err != nil {
 		return nil, fmt.Errorf("text: %w", err)
 	}
-	return &Font{outlines: outlines, face: face, source: source}, nil
+	f := &Font{outlines: outlines, face: face, source: source}
+	f.self.fonts = []*Font{f}
+	return f, nil
 }
 
 // Metrics is the vertical size of a line, in em, with Y up. Descent is usually
@@ -111,6 +113,9 @@ type Glyph struct {
 	Cluster int     // the index of the first rune of this glyph, in the runes of the text
 	Runes   int     // the count of runes of the cluster; more than 1 for a ligature
 	RTL     bool    // the glyph is in a right-to-left run
+	Font    *Font   // the font of this glyph: a Family can use more than one
+	Span    int     // the index of the Span that holds this glyph; 0 for a plain text
+	Scale   float32 // the size of the glyph, relative to one em of the text; 0 is 1
 
 	pen float32 // X without the offset of the shaper, for a caret
 }
@@ -142,29 +147,7 @@ func (o oneFace) ResolveFace(rune) *gofont.Face { return o.face }
 // Shape returns the lines of s. A newline in s starts a new paragraph, and the
 // base direction applies to each paragraph.
 func (f *Font) Shape(s string, o Options) []Line {
-	config := shaping.WrapConfig{Direction: direction(o)}
-	if o.MaxLines > 0 && o.Ellipsis != "" {
-		runes := []rune(o.Ellipsis)
-		config.Truncator = f.shaper.Shape(f.input(runes, o))
-	}
-
-	var lines []Line
-	offset := 0
-	paragraphs := strings.Split(s, "\n")
-	for i, paragraph := range paragraphs {
-		if o.MaxLines > 0 {
-			if len(lines) >= o.MaxLines {
-				break
-			}
-			config.TruncateAfterLines = o.MaxLines - len(lines)
-			config.TextContinues = i < len(paragraphs)-1
-		}
-		runes := []rune(paragraph)
-		lines = append(lines, f.shapeParagraph(runes, offset, config, o)...)
-		offset += len(runes) + 1
-	}
-	align(lines, o)
-	return lines
+	return f.self.Shape(s, o)
 }
 
 func direction(o Options) di.Direction {
@@ -181,46 +164,9 @@ func (f *Font) input(runes []rune, o Options) shaping.Input {
 	}
 }
 
-// shapeParagraph returns the lines of a text without a newline. An empty text is
-// one empty line. offset is the index of the first rune in the text of Shape.
-func (f *Font) shapeParagraph(runes []rune, offset int, config shaping.WrapConfig, o Options) []Line {
-	truncator := config.Truncator.Glyphs
-	if len(runes) == 0 {
-		// The wrapper needs text, so the last empty line adds the ellipsis here.
-		if config.TruncateAfterLines == 1 && config.TextContinues && len(truncator) > 0 {
-			mark := config.Truncator
-			mark.Runes = shaping.Range{}
-			line := layOut(shaping.Line{mark}, offset, truncator)
-			line.Metrics = f.Metrics()
-			return []Line{line}
-		}
-		return []Line{{Start: offset, End: offset, Metrics: f.Metrics()}}
-	}
-	var runs []shaping.Output
-	for _, part := range f.segments.Split(f.input(runes, o), oneFace{f.face}) {
-		runs = append(runs, f.shaper.Shape(part))
-	}
-
-	limit := math.MaxInt32 >> 6
-	if o.Width > 0 {
-		limit = int(o.Width * shapeSize)
-	}
-	wrapped, _ := f.wrapper.WrapParagraph(config, limit, runes, shaping.NewSliceIterator(runs))
-
-	stops := f.graphemes(runes, offset)
-	lines := make([]Line, len(wrapped))
-	for i, runs := range wrapped {
-		lines[i] = layOut(runs, offset, truncator)
-		lines[i].Metrics = f.Metrics()
-		lines[i].stops = stops
-		lines[i].ligatures = f.ligatures(lines[i].Glyphs)
-	}
-	return lines
-}
-
 // ligatures reads the carets of the glyphs that hold more than one rune. A cluster
 // with two spacing glyphs has no carets, because the carets of one do not cover both.
-func (f *Font) ligatures(glyphs []Glyph) []ligature {
+func ligatures(glyphs []Glyph) []ligature {
 	var out []ligature
 	for _, g := range glyphs {
 		if g.Runes < 2 || g.Advance <= 0 {
@@ -230,7 +176,7 @@ func (f *Font) ligatures(glyphs []Glyph) []ligature {
 			out[n-1].x = nil
 			continue
 		}
-		out = append(out, ligature{g.Cluster, f.caretsOf(g)})
+		out = append(out, ligature{g.Cluster, g.Font.caretsOf(g)})
 	}
 	return out
 }
@@ -249,7 +195,7 @@ func (f *Font) caretsOf(g Glyph) []float32 {
 	x := make([]float32, len(carets))
 	last := g.X
 	for i, c := range carets {
-		x[i] = g.X + float32(c)/float32(f.face.Upem())
+		x[i] = g.X + float32(c)/float32(f.face.Upem())*g.scale()
 		if x[i] <= last || x[i] >= g.X+g.Advance {
 			return nil
 		}
@@ -271,7 +217,7 @@ func (f *Font) graphemes(runes []rune, offset int) []int {
 // layOut places the runs of one line. A line holds its runs in the order of the
 // text, and VisualIndex gives their order on the screen. truncator is the glyphs of
 // the ellipsis: the wrapper shares them, and their clusters index the ellipsis.
-func layOut(runs shaping.Line, offset int, truncator []shaping.Glyph) Line {
+func layOut(runs shaping.Line, offset int, truncator []shaping.Glyph, fam *Family, styles []style) Line {
 	runs = slices.Clone(runs)
 	slices.SortFunc(runs, func(a, b shaping.Output) int { return int(a.VisualIndex - b.VisualIndex) })
 
@@ -286,6 +232,7 @@ func layOut(runs shaping.Line, offset int, truncator []shaping.Glyph) Line {
 
 		isTruncator := len(truncator) > 0 && len(run.Glyphs) > 0 && &run.Glyphs[0] == &truncator[0]
 		rtl := run.Direction.Progression() == di.TowardTopLeft
+		font, scale := fam.fontOf(run.Face, styles), runScale(run)
 		for _, g := range run.Glyphs {
 			cluster, count := offset+g.TextIndex(), g.RunesCount()
 			if isTruncator {
@@ -299,6 +246,9 @@ func layOut(runs shaping.Line, offset int, truncator []shaping.Glyph) Line {
 				Cluster: cluster,
 				Runes:   count,
 				RTL:     rtl,
+				Font:    font,
+				Span:    styleAt(styles, cluster).index,
+				Scale:   scale,
 				pen:     em(pen),
 			})
 			pen += g.Advance
@@ -403,6 +353,30 @@ func (l Line) graphemeStart(index int) int {
 	return l.stops[i-1]
 }
 
+// NextStop returns the first rune of the next grapheme after index, for a caret that
+// moves forward or a key that deletes forward. The result is at most End. A caret must
+// not count runes, because one grapheme can have many.
+func (l Line) NextStop(index int) int {
+	i, found := slices.BinarySearch(l.stops, index)
+	if found {
+		i++
+	}
+	if i == len(l.stops) {
+		return l.End
+	}
+	return min(max(l.stops[i], l.Start), l.End)
+}
+
+// PrevStop returns the first rune of the grapheme before index, for a caret that moves
+// back or a key that deletes back. The result is at least Start.
+func (l Line) PrevStop(index int) int {
+	i, _ := slices.BinarySearch(l.stops, index)
+	if i == 0 {
+		return l.Start
+	}
+	return min(max(l.stops[i-1], l.Start), l.End)
+}
+
 // XOf returns the X of the caret before the rune at index, in em. An index inside a
 // grapheme moves to the start of the grapheme, because a caret cannot stop in it. In a
 // ligature, XOf uses the carets of the font. If the font has none, it divides the width
@@ -471,8 +445,12 @@ func (l Line) ClusterAt(x float32) int {
 }
 
 // Add puts the outline of g into p, and returns its Entry. A glyph without
-// contours, such as a space, has no layers.
+// contours, such as a space, has no layers. It reads the outline from g.Font, so the
+// result is correct also if f is another font of the Family.
 func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
+	if g.Font != nil && g.Font != f {
+		return g.Font.Add(p, g)
+	}
 	key := slug.Key{Source: f.source, ID: g.ID}
 	if e, ok := p.Lookup(key); ok {
 		return e, nil
@@ -487,5 +465,14 @@ func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
 // At returns the matrix from the em space of g to a Y-down space, in which the
 // line starts at the origin and one em has the given size.
 func (g Glyph) At(size float32) slug.Affine {
-	return slug.Affine{size, 0, 0, -size, g.X * size, -g.Y * size}
+	s := size * g.scale()
+	return slug.Affine{s, 0, 0, -s, g.X * size, -g.Y * size}
+}
+
+// scale returns the value of Scale, where 0 is 1.
+func (g Glyph) scale() float32 {
+	if g.Scale == 0 {
+		return 1
+	}
+	return g.Scale
 }

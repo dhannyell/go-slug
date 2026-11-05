@@ -11,13 +11,15 @@ import (
 
 func raleway(t testing.TB) *Font { return load(t, "common/Raleway-v4020-Regular.otf") }
 
-func load(t testing.TB, name string) *Font {
+func load(t testing.TB, name string) *Font { return loadSource(t, name, 7) }
+
+func loadSource(t testing.TB, name string, source uint32) *Font {
 	t.Helper()
 	data, err := opentype.Files.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := Parse(data, 7)
+	f, err := Parse(data, source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +389,221 @@ func TestShapeCacheHitDoesNotAllocate(t *testing.T) {
 	c.Shape(f, "office", Options{})
 	if allocs := testing.AllocsPerRun(100, func() { c.Shape(f, "office", Options{}) }); allocs != 0 {
 		t.Errorf("allocs: %v", allocs)
+	}
+}
+
+// latinAndHebrew returns a Family whose primary font has no Hebrew.
+func latinAndHebrew(t *testing.T) (latin, hebrew *Font, fam *Family) {
+	t.Helper()
+	latin = loadSource(t, "common/Raleway-v4020-Regular.otf", 1)
+	hebrew = loadSource(t, "common/DejaVuSans.ttf", 2)
+	if hasRune(latin.face, 'א') || !hasRune(hebrew.face, 'א') {
+		t.Fatal("the test needs Hebrew only in the fallback font")
+	}
+	return latin, hebrew, NewFamily(latin, hebrew)
+}
+
+func glyphIDs(glyphs []Glyph) []uint32 {
+	ids := make([]uint32, len(glyphs))
+	for i, g := range glyphs {
+		ids[i] = g.ID
+	}
+	return ids
+}
+
+// Add must read the outline from the font of the glyph. The ID of another font
+// selects a wrong shape and shows no error.
+func TestFamilyUsesTheFirstFontWithTheRune(t *testing.T) {
+	latin, hebrew, fam := latinAndHebrew(t)
+	glyphs := fam.Shape("a א", Options{})[0].Glyphs
+	first, last := glyphs[0], glyphs[len(glyphs)-1]
+	if first.Font != latin || last.Font != hebrew {
+		t.Fatalf("the fonts are %p and %p, want %p and %p", first.Font, last.Font, latin, hebrew)
+	}
+	if last.ID == 0 {
+		t.Error("the Hebrew rune has the missing glyph")
+	}
+	var pack slug.Pack
+	e, err := latin.Add(&pack, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Key != (slug.Key{Source: 2, ID: last.ID}) {
+		t.Errorf("got entry %+v from the wrong font", e)
+	}
+}
+
+func TestFamilyUsesThePrimaryFontForAMissingRune(t *testing.T) {
+	latin, _, fam := latinAndHebrew(t)
+	g := fam.Shape("\U0001E900", Options{})[0].Glyphs[0]
+	if g.Font != latin || g.ID != 0 {
+		t.Errorf("got glyph %d of %p, want the missing glyph of %p", g.ID, g.Font, latin)
+	}
+}
+
+// The shaper can place a mark only on a base of the same font, so the first font
+// with the mark is the wrong choice here.
+func TestMarkStaysWithItsBase(t *testing.T) {
+	latin, hebrew, fam := latinAndHebrew(t)
+	if !hasRune(latin.face, 0x301) || !hasRune(hebrew.face, 0x301) {
+		t.Fatal("the test needs the mark in the two fonts")
+	}
+	for _, g := range fam.Shape("א́", Options{})[0].Glyphs {
+		if g.Font != hebrew {
+			t.Errorf("glyph %d is not in the font of its base", g.ID)
+		}
+	}
+}
+
+func TestNewFamilyRejectsASharedSource(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("two fonts with one source did not panic")
+		}
+	}()
+	NewFamily(load(t, "common/DejaVuSans.ttf"), load(t, "common/Raleway-v4020-Regular.otf"))
+}
+
+func TestEllipsisUsesAFontWithItsRunes(t *testing.T) {
+	_, hebrew, fam := latinAndHebrew(t)
+	glyphs := fam.Shape("aaaaaaaaaaaaaaaa", Options{Width: 2, MaxLines: 1, Ellipsis: "א"})[0].Glyphs
+	g := glyphs[len(glyphs)-1]
+	if g.Font != hebrew || g.ID == 0 {
+		t.Errorf("the ellipsis has glyph %d of %p", g.ID, g.Font)
+	}
+}
+
+// A big span must move the next glyphs, and draw at its own size. An empty span keeps
+// its index, because the caller reads Span to find its own style.
+func TestSpanScaleAndIndex(t *testing.T) {
+	f := raleway(t)
+	line := f.self.ShapeSpans([]Span{{Text: "a"}, {}, {Text: "a", Scale: 2}, {Text: "a"}}, Options{})[0]
+	a, b, c := line.Glyphs[0], line.Glyphs[1], line.Glyphs[2]
+	if a.Span != 0 || b.Span != 2 || c.Span != 3 {
+		t.Errorf("the spans are %d, %d, %d", a.Span, b.Span, c.Span)
+	}
+	if b.Advance != 2*a.Advance {
+		t.Errorf("the advances are %v and %v", a.Advance, b.Advance)
+	}
+	if c.X != b.X+b.Advance {
+		t.Errorf("the glyph after the big span is at %v, want %v", c.X, b.X+b.Advance)
+	}
+	if got := b.At(10); got[0] != 20 || got[3] != -20 || got[4] != b.X*10 {
+		t.Errorf("At returns %v", got)
+	}
+	if got := a.At(10); got[0] != 10 {
+		t.Errorf("At returns %v for the plain glyph", got)
+	}
+}
+
+// Cluster values index all the text, also after a newline in a span.
+func TestSpansCrossNewlines(t *testing.T) {
+	f := raleway(t)
+	lines := f.self.ShapeSpans([]Span{{Text: "éb\nc"}, {Text: "d\ne", Scale: 2}}, Options{})
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines", len(lines))
+	}
+	middle, last := lines[1].Glyphs, lines[2].Glyphs
+	if middle[0].Cluster != 3 || middle[0].Span != 0 || middle[1].Cluster != 4 || middle[1].Span != 1 {
+		t.Errorf("the middle line has %+v", middle)
+	}
+	if last[0].Cluster != 6 || last[0].Span != 1 || last[0].Scale != 2 {
+		t.Errorf("the last line has %+v", last[0])
+	}
+}
+
+// A cut in a span must not change the shape of a joining script or the order of bidi.
+func TestSpanCutKeepsJoiningAndBidi(t *testing.T) {
+	f := load(t, "common/NotoSansArabic.ttf")
+	const text = "abc سلام def"
+	whole := f.Shape(text, Options{})[0]
+	cut := f.self.ShapeSpans([]Span{{Text: "abc س"}, {Text: "لا"}, {Text: "م def"}}, Options{})[0]
+	if !slices.Equal(glyphIDs(whole.Glyphs), glyphIDs(cut.Glyphs)) {
+		t.Errorf("the IDs are %v, want %v", glyphIDs(cut.Glyphs), glyphIDs(whole.Glyphs))
+	}
+}
+
+// Two spans can have two sizes, so one glyph cannot hold runes of the two.
+func TestLigatureDoesNotCrossSpans(t *testing.T) {
+	f := raleway(t)
+	whole := f.Shape("office", Options{})[0]
+	cut := f.self.ShapeSpans([]Span{{Text: "of"}, {Text: "fice"}}, Options{})[0]
+	if len(cut.Glyphs) <= len(whole.Glyphs) {
+		t.Errorf("the cut text has %d glyphs, and the whole text has %d", len(cut.Glyphs), len(whole.Glyphs))
+	}
+}
+
+// The next baseline must clear the tallest run. The primary font always counts, so
+// a label does not jump when its text changes to another alphabet.
+func TestLineMetricsHoldAllTheRuns(t *testing.T) {
+	latin, hebrew, fam := latinAndHebrew(t)
+	both := latin.Metrics().union(hebrew.Metrics())
+	if got := fam.Shape("א", Options{})[0].Metrics; got != both {
+		t.Errorf("the fallback line has %+v, want %+v", got, both)
+	}
+	if got := fam.Shape("a", Options{})[0].Metrics; got != latin.Metrics() {
+		t.Errorf("the Latin line has %+v, want %+v", got, latin.Metrics())
+	}
+	big := fam.ShapeSpans([]Span{{Text: "a", Scale: 2}}, Options{})[0].Metrics
+	if want := latin.Metrics().union(latin.Metrics().scaled(2)); big != want {
+		t.Errorf("the big line has %+v, want %+v", big, want)
+	}
+}
+
+// A caret in a big ligature must stay in the glyph.
+func TestCaretOfTheFontUsesTheScale(t *testing.T) {
+	f := load(t, "toys/GDEFCaretList3.ttf")
+	line := f.self.ShapeSpans([]Span{{Text: "fi", Scale: 2}}, Options{})[0]
+	if got, want := line.XOf(1), line.Glyphs[0].X+2*679.0/2048; got != want {
+		t.Errorf("the caret is at %v, want %v", got, want)
+	}
+}
+
+// A key press moves over one grapheme, and stays in the line.
+func TestStepMovesOneGrapheme(t *testing.T) {
+	f := load(t, "common/DejaVuSans.ttf")
+	line := f.Shape("aéb", Options{})[0]
+	for _, c := range []struct{ index, next, prev int }{
+		{0, 1, 0}, {1, 3, 0}, {2, 3, 1}, {3, 4, 1}, {4, 4, 3},
+	} {
+		if got := line.NextStop(c.index); got != c.next {
+			t.Errorf("NextStop(%d) = %d, want %d", c.index, got, c.next)
+		}
+		if got := line.PrevStop(c.index); got != c.prev {
+			t.Errorf("PrevStop(%d) = %d, want %d", c.index, got, c.prev)
+		}
+	}
+
+	lines := f.Shape("aaaa bbbb", Options{Width: 3})
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines", len(lines))
+	}
+	if got := lines[0].NextStop(lines[0].End); got != lines[0].End {
+		t.Errorf("NextStop leaves the first line: %d", got)
+	}
+	if got := lines[1].PrevStop(lines[1].Start); got != lines[1].Start {
+		t.Errorf("PrevStop leaves the last line: %d", got)
+	}
+}
+
+func TestShapeCacheSpans(t *testing.T) {
+	f := raleway(t)
+	c := NewShapeCache(8)
+	spans := []Span{{Text: "of"}, {Text: "fice", Scale: 2}}
+	c.ShapeSpans(&f.self, spans, Options{})
+	if allocs := testing.AllocsPerRun(100, func() { c.ShapeSpans(&f.self, spans, Options{}) }); allocs != 0 {
+		t.Errorf("allocs: %v", allocs)
+	}
+
+	base := c.ShapeSpans(&f.self, []Span{{Text: "ab"}, {Text: "c"}}, Options{})
+	for name, other := range map[string][]Span{
+		"cut":    {{Text: "a"}, {Text: "bc"}},
+		"scale":  {{Text: "ab"}, {Text: "c", Scale: 2}},
+		"family": {{Text: "ab"}, {Text: "c", Family: NewFamily(f)}},
+	} {
+		if lines := c.ShapeSpans(&f.self, other, Options{}); &lines[0] == &base[0] {
+			t.Errorf("%s: the cache returned the lines of another key", name)
+		}
 	}
 }
 
