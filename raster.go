@@ -100,6 +100,7 @@ func (p *Pack) layerAt(i uint32) layerRecord {
 			count:         r[13] & 0xFFFF,
 			spread:        Spread(r[13] >> 16 & 0xFF),
 			premultiplied: r[13]>>24&1 != 0,
+			linear:        r[13]>>25&1 != 0,
 		}
 	}
 	return l

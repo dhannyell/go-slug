@@ -382,6 +382,13 @@ func gradientImage(t *testing.T, paint Paint) *image.RGBA {
 	return dst
 }
 
+func withSpace(p Paint, s ColorSpace) Paint {
+	g := *p.Gradient
+	g.Space = s
+	p.Gradient = &g
+	return p
+}
+
 func withSpread(p Paint, s Spread) Paint {
 	p.Gradient.Spread = s
 	return p
@@ -412,6 +419,7 @@ func TestGradientValues(t *testing.T) {
 		{"sweep seam", SweepPaint(Point{16, 16.5}, 0, 2*math.Pi, ramp...), 24, 16, 0.5},
 		{"stripes under a pixel", withSpread(LinearPaint(Point{0, 0}, Point{0.25, 0}, ramp...), Repeat), 9, 3, 0.5},
 		{"reflect stripes under a pixel", withSpread(LinearPaint(Point{0, 0}, Point{0.25, 0}, ramp...), Reflect), 9, 3, 0.5},
+		{"linear light", withSpace(line, LinearSRGB), 12, 3, 0.567}, // sRGB of 4.5/16 in linear light
 		{"no direction", LinearPaint(Point{8, 8}, Point{8, 8}, ramp...), 3, 3, 1},
 		{"one stop", RadialPaint(Point{8, 8}, 0, Point{8, 8}, 8, Stop{0, white}), 3, 3, 1},
 	}

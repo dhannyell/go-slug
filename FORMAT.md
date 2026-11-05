@@ -89,7 +89,7 @@ A layer with a gradient kind uses words 12 to 22 in a different way:
 | Word | Field | Content |
 |---|---|---|
 | 12 | `stops` | the word in `Bands()` of the first stop |
-| 13 | `info` | stop count in bits 0-15; spread in bits 16-23 (0 pad, 1 repeat, 2 reflect); bit 24: mix with premultiplied alpha |
+| 13 | `info` | stop count in bits 0-15; spread in bits 16-23 (0 pad, 1 repeat, 2 reflect); bit 24: mix with premultiplied alpha; bit 25: the stop colors are in linear light, and the result goes back to sRGB |
 | 14-15 | `a`, `b` (`float32`) | radial: `r0`, `r1`; sweep: `start`, `end`, in radians; linear: 0 |
 | 16-21 | `toPaint` (`float32`) | the matrix a, b, c, d, e, f from em space to paint space. It includes `Layer.Transform` |
 | 22 | `cx` (`float32`) | radial: 0 or 1; else 0 |

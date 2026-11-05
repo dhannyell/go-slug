@@ -222,11 +222,17 @@ func (p *Pack) gradientWords(g *Gradient, r *gradientRecord) [12]uint32 {
 	stops := uint32(len(p.bands))
 	for _, s := range g.Stops {
 		c := s.Color
+		if g.Space == LinearSRGB {
+			c[0], c[1], c[2] = toLinear(c[0]), toLinear(c[1]), toLinear(c[2])
+		}
 		p.bands = append(p.bands, f(s.Offset), f(c[0]), f(c[1]), f(c[2]), f(c[3]))
 	}
 	info := uint32(len(g.Stops)) | uint32(g.Spread)<<16
 	if g.Premultiplied {
 		info |= 1 << 24
+	}
+	if g.Space == LinearSRGB {
+		info |= 1 << 25
 	}
 	m := r.toPaint
 	return [12]uint32{
