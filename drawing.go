@@ -135,8 +135,11 @@ type Path struct {
 type PaintKind uint8
 
 const (
-	CurrentColor PaintKind = iota // the host supplies the color
-	Solid                         // Paint.Color
+	CurrentColor   PaintKind = iota // the host supplies the color
+	Solid                           // Paint.Color
+	LinearGradient                  // Paint.Gradient: along a line
+	RadialGradient                  // Paint.Gradient: between two circles
+	SweepGradient                   // Paint.Gradient: around a point
 )
 
 // Paint is the color of a layer.
@@ -145,6 +148,61 @@ type Paint struct {
 	// Color is straight (not premultiplied) RGB in sRGB; alpha is linear, 0 to 1.
 	// Only Solid reads it.
 	Color [4]float32
+	// Gradient is the gradient of a gradient kind.
+	Gradient *Gradient
+}
+
+// Spread selects the color outside the range of a gradient.
+type Spread uint8
+
+const (
+	Pad     Spread = iota // the color of the nearest end
+	Repeat                // the range 0 to 1 again
+	Reflect               // the range 0 to 1 again, in the opposite direction at each step
+)
+
+// Stop is one color of a gradient.
+type Stop struct {
+	// Offset is the position along the gradient. Each stop must have an offset of at
+	// least the offset of the previous stop. Two equal offsets make a hard edge.
+	Offset float32
+	// Color is like Paint.Color.
+	Color [4]float32
+}
+
+// Gradient is a color that changes over a layer. Colors mix in sRGB. Use LinearPaint,
+// RadialPaint or SweepPaint to make one. A gradient without a direction, such as a
+// line of length 0, draws the color of its last stop.
+type Gradient struct {
+	Stops  []Stop
+	Spread Spread
+	// Premultiplied mixes the stops with RGB multiplied by alpha, so a transparent
+	// stop gives no color to its neighbor.
+	Premultiplied bool
+	// Transform maps the space of the fields below to drawing units, before
+	// Layer.Transform. nil means identity.
+	Transform *Affine
+
+	P0, P1     Point   // linear: the line; radial: the centers; sweep: P0 is the center
+	R0, R1     float32 // radial: the radii at offset 0 and offset 1
+	Start, End float32 // sweep: the angles at offset 0 and offset 1, in radians, from +X to +Y
+}
+
+// LinearPaint returns a gradient from p0, at offset 0, to p1, at offset 1.
+func LinearPaint(p0, p1 Point, stops ...Stop) Paint {
+	return Paint{Kind: LinearGradient, Gradient: &Gradient{Stops: stops, P0: p0, P1: p1}}
+}
+
+// RadialPaint returns a gradient from one circle, at offset 0, to another circle, at
+// offset 1. Outside the circles of a cone, the layer is transparent.
+func RadialPaint(c0 Point, r0 float32, c1 Point, r1 float32, stops ...Stop) Paint {
+	return Paint{Kind: RadialGradient, Gradient: &Gradient{Stops: stops, P0: c0, P1: c1, R0: r0, R1: r1}}
+}
+
+// SweepPaint returns a gradient around center, from the angle start, at offset 0, to
+// the angle end, at offset 1.
+func SweepPaint(center Point, start, end float32, stops ...Stop) Paint {
+	return Paint{Kind: SweepGradient, Gradient: &Gradient{Stops: stops, P0: center, Start: start, End: end}}
 }
 
 // Layer is one filled path with its paint.

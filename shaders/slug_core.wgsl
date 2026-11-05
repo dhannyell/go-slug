@@ -18,6 +18,13 @@ const SLUG_NO_ROOT = -1e10;
 
 const SLUG_EVEN_ODD = 1u;
 const SLUG_SOLID = 1u;
+const SLUG_LINEAR = 2u;
+const SLUG_RADIAL = 3u;
+const SLUG_SWEEP = 4u;
+const SLUG_REPEAT = 1u;
+const SLUG_REFLECT = 2u;
+const SLUG_STOP_WORDS = 5u;
+const SLUG_TAU = 6.283185307179586;
 
 struct SlugLayer {
     band_loc: u32,
@@ -148,6 +155,138 @@ fn slug_coverage(l: SlugLayer, coord: vec2f, pixels_per_em: vec2f) -> f32 {
     let x = slug_ray(l, h, coord, false, pixels_per_em.x);
     let y = slug_ray(l, l.n_h + v, coord, true, pixels_per_em.y);
     return slug_combine(x, y, l.rule);
+}
+
+// slug_stop_color returns the color of a stop, or of the first word of its color.
+fn slug_stop_color(word: u32) -> vec4f {
+    return vec4f(
+        bitcast<f32>(slug_band(word + 1u)),
+        bitcast<f32>(slug_band(word + 2u)),
+        bitcast<f32>(slug_band(word + 3u)),
+        bitcast<f32>(slug_band(word + 4u)),
+    );
+}
+
+fn slug_mix_stops(a: vec4f, b: vec4f, f: f32, premultiplied: bool) -> vec4f {
+    if !premultiplied {
+        return a + (b - a) * f;
+    }
+    let alpha = a.a + (b.a - a.a) * f;
+    if alpha <= 0.0 {
+        return vec4f(0.0);
+    }
+    let rgb = a.rgb * a.a + (b.rgb * b.a - a.rgb * a.a) * f;
+    return vec4f(rgb / alpha, alpha);
+}
+
+fn slug_gradient_stop(first: u32, count: u32, t: f32, premultiplied: bool) -> vec4f {
+    var lo = bitcast<f32>(slug_band(first));
+    var lo_color = slug_stop_color(first);
+    if t <= lo {
+        return lo_color;
+    }
+    for (var i = 1u; i < count; i++) {
+        let word = first + i * SLUG_STOP_WORDS;
+        let hi = bitcast<f32>(slug_band(word));
+        let hi_color = slug_stop_color(word);
+        if t <= hi {
+            // t is over lo, so the two offsets differ.
+            return slug_mix_stops(lo_color, hi_color, (t - lo) / (hi - lo), premultiplied);
+        }
+        lo = hi;
+        lo_color = hi_color;
+    }
+    return lo_color;
+}
+
+// slug_radial_t returns the larger t whose circle has a radius of at least 0 and
+// passes through at, in x. y is 1 if that circle exists.
+fn slug_radial_t(at: vec2f, r0: f32, r1: f32, cx: f32) -> vec2f {
+    let dr = r1 - r0;
+    let a = cx * cx - dr * dr;
+    let b = at.x * cx + r0 * dr;
+    let c = dot(at, at) - r0 * r0;
+    var t1: f32;
+    var t2: f32;
+    if abs(a) < SLUG_NEAR_ZERO {
+        if b == 0.0 {
+            return vec2f(0.0);
+        }
+        t1 = c * 0.5 / b;
+        t2 = t1;
+    } else {
+        let d = b * b - a * c;
+        if d < 0.0 {
+            return vec2f(0.0);
+        }
+        let s = sqrt(d);
+        t1 = max((b + s) / a, (b - s) / a);
+        t2 = min((b + s) / a, (b - s) / a);
+    }
+    if r0 + t1 * dr >= 0.0 {
+        return vec2f(t1, 1.0);
+    }
+    if r0 + t2 * dr >= 0.0 {
+        return vec2f(t2, 1.0);
+    }
+    return vec2f(0.0);
+}
+
+// slug_sweep_t measures the angle from start in the direction of end, up to one turn.
+fn slug_sweep_t(at: vec2f, start: f32, end: f32) -> f32 {
+    // WGSL does not define atan2(0, 0).
+    var angle = -start;
+    if at.x != 0.0 || at.y != 0.0 {
+        angle = atan2(at.y, at.x) - start;
+    }
+    var span = end - start;
+    if span < 0.0 {
+        angle = -angle;
+        span = -span;
+    }
+    angle -= SLUG_TAU * floor(angle / SLUG_TAU);
+    return angle / span;
+}
+
+// slug_paint returns the straight color of layer i at coord, in em space. current is
+// the color of a CurrentColor layer. A host that does not call it draws a gradient
+// with its own color.
+fn slug_paint(i: u32, l: SlugLayer, coord: vec2f, current: vec4f) -> vec4f {
+    if l.kind == SLUG_SOLID {
+        return l.color;
+    }
+    if l.kind < SLUG_LINEAR || l.kind > SLUG_SWEEP {
+        return current;
+    }
+    let r = i * 24u;
+    let first = slug_layer(r + 12u);
+    let info = slug_layer(r + 13u);
+    let at = vec2f(
+        slug_layer_f32(r + 16u) * coord.x + slug_layer_f32(r + 18u) * coord.y + slug_layer_f32(r + 20u),
+        slug_layer_f32(r + 17u) * coord.x + slug_layer_f32(r + 19u) * coord.y + slug_layer_f32(r + 21u),
+    );
+    let a = slug_layer_f32(r + 14u);
+    let b = slug_layer_f32(r + 15u);
+    var t = at.x;
+    if l.kind == SLUG_RADIAL {
+        let radial = slug_radial_t(at, a, b, slug_layer_f32(r + 22u));
+        if radial.y == 0.0 {
+            return vec4f(0.0);
+        }
+        t = radial.x;
+    } else if l.kind == SLUG_SWEEP {
+        t = slug_sweep_t(at, a, b);
+    }
+    let spread = (info >> 16u) & 0xFFu;
+    if spread == SLUG_REPEAT {
+        t -= floor(t);
+    } else if spread == SLUG_REFLECT {
+        t -= 2.0 * floor(t * 0.5);
+        if t > 1.0 {
+            t = 2.0 - t;
+        }
+    }
+    return slug_gradient_stop(first, info & 0xFFFFu, t, ((info >> 24u) & 1u) != 0u);
 }
 
 // slug_dilate moves a corner of a layer box out by half of fwidth(coord): a

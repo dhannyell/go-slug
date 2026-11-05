@@ -20,7 +20,8 @@ const nearZero = 1.0 / 65536
 // Rasterize draws all layers of e over dst, in order. view maps em space to
 // dst pixels; it usually flips Y, because em space is Y-up and dst is Y-down.
 // color is the color of a CurrentColor layer. It is straight RGB, like
-// Paint.Color. Rasterize blends in sRGB.
+// Paint.Color. Rasterize blends in sRGB, and it evaluates a gradient at the center of
+// each pixel.
 func (p *Pack) Rasterize(e Entry, view Affine, color [4]float32, dst *image.RGBA) error {
 	inverse, ok := view.Invert()
 	if !ok {
@@ -35,7 +36,10 @@ func (p *Pack) Rasterize(e Entry, view Affine, color [4]float32, dst *image.RGBA
 		if l.kind == Solid {
 			c = l.color
 		}
-		p.eachPixel(l, view, inverse, dst.Bounds(), func(x, y int, cov float32) {
+		p.eachPixel(l, view, inverse, dst.Bounds(), func(x, y int, coord Point, cov float32) {
+			if l.kind >= LinearGradient {
+				c = p.gradientColor(l.kind, &l.gradient, coord)
+			}
 			blendOver(dst.Pix[dst.PixOffset(x, y):][:4:4], c, cov)
 		})
 	}
@@ -52,7 +56,7 @@ func (p *Pack) Coverage(layer uint32, view Affine, dst *image.Alpha) error {
 	if uint64(layer) >= uint64(len(p.layers)/LayerWords) {
 		return fmt.Errorf("slug: layer %d is outside the pack", layer)
 	}
-	p.eachPixel(p.layerAt(layer), view, inverse, dst.Bounds(), func(x, y int, cov float32) {
+	p.eachPixel(p.layerAt(layer), view, inverse, dst.Bounds(), func(x, y int, _ Point, cov float32) {
 		dst.Pix[dst.PixOffset(x, y)] = unorm8(cov)
 	})
 	return nil
@@ -67,12 +71,13 @@ type layerRecord struct {
 	scale, offset Point
 	bounds        Rect
 	color         [4]float32
+	gradient      layerGradient
 }
 
 func (p *Pack) layerAt(i uint32) layerRecord {
 	r := p.layers[i*LayerWords:][:LayerWords]
 	f := math.Float32frombits
-	return layerRecord{
+	l := layerRecord{
 		bandLoc: r[0],
 		nH:      int(r[1] & 0xFFFF),
 		nV:      int(r[1] >> 16),
@@ -83,10 +88,25 @@ func (p *Pack) layerAt(i uint32) layerRecord {
 		bounds:  Rect{Point{f(r[8]), f(r[9])}, Point{f(r[10]), f(r[11])}},
 		color:   [4]float32{f(r[12]), f(r[13]), f(r[14]), f(r[15])},
 	}
+	if l.kind >= LinearGradient {
+		l.gradient = layerGradient{
+			gradientRecord: gradientRecord{
+				toPaint: Affine{f(r[16]), f(r[17]), f(r[18]), f(r[19]), f(r[20]), f(r[21])},
+				a:       f(r[14]),
+				b:       f(r[15]),
+				cx:      f(r[22]),
+			},
+			stops:         r[12],
+			count:         r[13] & 0xFFFF,
+			spread:        Spread(r[13] >> 16 & 0xFF),
+			premultiplied: r[13]>>24&1 != 0,
+		}
+	}
+	return l
 }
 
 // eachPixel calls visit for each pixel of area that l can touch.
-func (p *Pack) eachPixel(l layerRecord, view, inverse Affine, area image.Rectangle, visit func(x, y int, cov float32)) {
+func (p *Pack) eachPixel(l layerRecord, view, inverse Affine, area image.Rectangle, visit func(x, y int, coord Point, cov float32)) {
 	ems := emPerPixel(inverse)
 	pixelsPerEm := Point{1 / ems.X, 1 / ems.Y}
 	// A coverage is not 0 only up to half of ems from the bounds.
@@ -97,7 +117,7 @@ func (p *Pack) eachPixel(l layerRecord, view, inverse Affine, area image.Rectang
 		for dx := range r.Dx() {
 			x, y := r.Min.X+dx, r.Min.Y+dy
 			coord := inverse.Apply(Point{float32(x) + 0.5, float32(y) + 0.5})
-			visit(x, y, p.coverageAt(l, coord, pixelsPerEm))
+			visit(x, y, coord, p.coverageAt(l, coord, pixelsPerEm))
 		}
 	}
 }

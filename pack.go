@@ -198,6 +198,13 @@ func (p *Pack) appendShape(s shape) {
 	scaleY, offsetY := bandFit(s.Bounds.Min.Y, s.Bounds.Max.Y, len(set.H))
 	f := math.Float32bits
 	c := s.Paint.Color
+	paint := [12]uint32{
+		f(c[0]), f(c[1]), f(c[2]), f(c[3]),
+		f(1), f(0), f(0), f(1), f(0), f(0), 0, 0, // transform: reserved identity
+	}
+	if g := s.Gradient; g != nil {
+		paint = p.gradientWords(s.Paint.Gradient, g)
+	}
 	p.layers = append(p.layers,
 		bandLoc,
 		uint32(len(set.H))|uint32(len(set.V))<<16,
@@ -205,9 +212,27 @@ func (p *Pack) appendShape(s shape) {
 		0, // clip reference: reserved
 		f(scaleX), f(scaleY), f(offsetX), f(offsetY),
 		f(s.Bounds.Min.X), f(s.Bounds.Min.Y), f(s.Bounds.Max.X), f(s.Bounds.Max.Y),
-		f(c[0]), f(c[1]), f(c[2]), f(c[3]),
-		f(1), f(0), f(0), f(1), f(0), f(0), 0, 0, // transform: reserved identity
 	)
+	p.layers = append(p.layers, paint[:]...)
+}
+
+// gradientWords writes the stops, and returns words 12 to 23 of the layer record.
+func (p *Pack) gradientWords(g *Gradient, r *gradientRecord) [12]uint32 {
+	f := math.Float32bits
+	stops := uint32(len(p.bands))
+	for _, s := range g.Stops {
+		c := s.Color
+		p.bands = append(p.bands, f(s.Offset), f(c[0]), f(c[1]), f(c[2]), f(c[3]))
+	}
+	info := uint32(len(g.Stops)) | uint32(g.Spread)<<16
+	if g.Premultiplied {
+		info |= 1 << 24
+	}
+	m := r.toPaint
+	return [12]uint32{
+		stops, info, f(r.a), f(r.b),
+		f(m[0]), f(m[1]), f(m[2]), f(m[3]), f(m[4]), f(m[5]), f(r.cx), 0,
+	}
 }
 
 // appendCurves writes curves and returns the texel of each. A curve that starts

@@ -3,6 +3,8 @@ package slug
 import (
 	"encoding/binary"
 	"errors"
+	"image"
+	"math"
 	"slices"
 	"testing"
 )
@@ -96,5 +98,34 @@ func TestDecodeRejectsBadData(t *testing.T) {
 		if _, err := Decode(c.data); !errors.Is(err, ErrInvalidPack) {
 			t.Errorf("%s: err = %v, want ErrInvalidPack", c.name, err)
 		}
+	}
+}
+
+// A decoded gradient reads its stops from the bands, and version 1 still decodes.
+func TestDecodeGradientAndVersion1(t *testing.T) {
+	var p Pack
+	e := mustAdd(t, &p, 1, Drawing{Em: rasterEm, Layers: []Layer{{
+		Path:  squarePath(0, 0, 32),
+		Paint: withSpread(SweepPaint(Point{16, 16}, 0, 2*math.Pi, ramp...), Reflect),
+	}}})
+	back, err := Decode(p.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, got := image.NewRGBA(image.Rect(0, 0, 32, 32)), image.NewRGBA(image.Rect(0, 0, 32, 32))
+	if err := p.Rasterize(e, pixelView, white, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := back.Rasterize(e, pixelView, white, got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(want.Pix, got.Pix) {
+		t.Error("the decoded gradient draws other pixels")
+	}
+
+	old := encodedPack(t).Encode()
+	binary.LittleEndian.PutUint32(old[4:], 1)
+	if _, err := Decode(old); err != nil {
+		t.Errorf("version 1: %v", err)
 	}
 }

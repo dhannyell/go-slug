@@ -20,6 +20,7 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Draw on the GPU](#draw-on-the-gpu)
+- [Fill with a gradient](#fill-with-a-gradient)
 - [Shape text](#shape-text)
 - [Limit the memory](#limit-the-memory)
 - [Compare with other methods](#compare-with-other-methods)
@@ -34,7 +35,7 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - **No graphics API dependency.** The library produces data buffers and WGSL code
   that any WebGPU host can use.
 - **Fonts, icons and shapes.** A `Drawing` has layers of filled paths, with fill rules,
-  transforms and solid colors. The `font` package reads TrueType and OpenType glyphs.
+  transforms, solid colors and gradients. The `font` package reads TrueType and OpenType glyphs.
 - **Exact perspective.** A plane in 3D needs only its matrix.
 - **Incremental upload.** A `Pack` is an arena with an optional limit. `TakeDirty` tells
   which data is new, and `Reset` empties it for a new generation.
@@ -47,6 +48,8 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
   caret positions and synthetic bold, slant and outline.
 - **Strokes.** `Path.Stroke` turns a line into a fill, with caps and joins, and
   `Path.Embolden` moves the edges of a shape out.
+- **Gradients.** `LinearPaint`, `RadialPaint` and `SweepPaint` fill a layer with stops,
+  a spread and a transform. They also work on strokes and glyphs.
 
 ## Install
 
@@ -155,6 +158,22 @@ func main() {
 `slug_curve`, `slug_band` and `slug_layer`, which you declare. [FORMAT.md](FORMAT.md)
 describes the data. [samples/internal/render](samples/internal/render) is a complete
 host.
+
+## Fill with a gradient
+
+A gradient is a paint of a layer. Its coordinates are in the units of the path:
+
+```go
+paint := slug.LinearPaint(slug.Point{X: 0}, slug.Point{X: 1},
+	slug.Stop{Offset: 0, Color: [4]float32{0.98, 0.78, 0.20, 1}},
+	slug.Stop{Offset: 1, Color: [4]float32{0.20, 0.15, 0.55, 1}},
+)
+paint.Gradient.Spread = slug.Reflect
+entry, err := pack.Add(key, slug.Drawing{Em: 1, Layers: []slug.Layer{{Path: path, Paint: paint}}})
+```
+
+A custom shader gets the color from `slug_paint`. `slug_reference.wgsl` shows the call.
+A shader that does not call it draws a gradient in the color of its instance.
 
 ## Shape text
 
@@ -326,6 +345,7 @@ In a window, the keys select the scenes and the views. In a browser, the address
 | 5 | [`hall`](https://dhannyell.github.io/go-slug/?scene=hall) | a walk in 3D: text on the floor, signs on the walls and a turning cube |
 | 6 | [`dive`](https://dhannyell.github.io/go-slug/?scene=dive) | a camera that goes from a whole word to one corner of a letter |
 | 7 | [`news`](https://dhannyell.github.io/go-slug/?scene=news) | a folded newspaper, full of small text: a drag turns it, and the wheel zooms |
+| 8 | [`gradients`](https://dhannyell.github.io/go-slug/?scene=gradients) | each gradient kind and spread, on shapes, a stroke and text |
 
 | Key | Address | Shows |
 | --- | --- | --- |

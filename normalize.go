@@ -15,6 +15,8 @@ type shape struct {
 	Bounds Rect
 	Rule   FillRule
 	Paint  Paint
+	// Gradient is set for a gradient kind of Paint.
+	Gradient *gradientRecord
 }
 
 // cubicErr is √3/36, the error factor of one cubic-to-quadratic step.
@@ -41,11 +43,16 @@ func normalize(d Drawing, tol float32) ([]shape, error) {
 		if !ok {
 			continue
 		}
+		paint, gradient, err := canonicalPaint(layer.Paint, m, d.Em)
+		if err != nil {
+			return nil, fmt.Errorf("layer %d: %w", li, err)
+		}
 		shapes = append(shapes, shape{
-			Curves: curves,
-			Bounds: bounds,
-			Rule:   layer.Path.Rule,
-			Paint:  layer.Paint,
+			Curves:   curves,
+			Bounds:   bounds,
+			Rule:     layer.Path.Rule,
+			Paint:    paint,
+			Gradient: gradient,
 		})
 	}
 	return shapes, nil

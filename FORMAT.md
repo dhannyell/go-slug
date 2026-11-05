@@ -1,7 +1,8 @@
 # go-slug data format
 
 A `Pack` holds three GPU arrays and one table. This document describes the
-arrays, and the bytes of `Pack.Encode`. The current version is **1**.
+arrays, and the bytes of `Pack.Encode`. The current version is **2**. Version 2 adds the gradient
+paint kinds. A reader of version 2 also reads version 1.
 
 All coordinates are in em space, Y-up: drawing units divided by `Drawing.Em`. A
 host gets a position in pixels when it multiplies a coordinate by the size of
@@ -47,6 +48,9 @@ have the same thickness. The data starts at the word `bandLoc` of the layer:
 | `2 * nV` | vertical band headers: `count`, `offset` |
 | the rest | curve lists |
 
+`Bands()` also holds the stops of gradients. A layer record has their address, and a
+reader of band lists does not reach them.
+
 The list of a band starts at the word `bandLoc + offset`. It has `count` words.
 Each word is the `loc` texel of a curve.
 
@@ -72,7 +76,7 @@ v = clamp(int(x * scaleX + offsetX), 0, nV - 1)
 |---|---|---|
 | 0 | `bandLoc` | first word of the band data |
 | 1 | `bandCounts` | `nH` in bits 0-15, `nV` in bits 16-31 |
-| 2 | `flags` | bits 0-7: fill rule (0 non-zero, 1 even-odd); bits 8-15: paint kind (0 current color, 1 solid); bits 16-23: blend, **reserved**, 0; bits 24-31: **reserved**, 0 |
+| 2 | `flags` | bits 0-7: fill rule (0 non-zero, 1 even-odd); bits 8-15: paint kind (0 current color, 1 solid, 2 linear gradient, 3 radial gradient, 4 sweep gradient); bits 16-23: blend, **reserved**, 0; bits 24-31: **reserved**, 0 |
 | 3 | `clipRef` | **reserved**, 0 |
 | 4-7 | banding (`float32`) | `scaleX`, `scaleY`, `offsetX`, `offsetY` |
 | 8-11 | bounds (`float32`) | min x, min y, max x, max y |
@@ -80,8 +84,40 @@ v = clamp(int(x * scaleX + offsetX), 0, nV - 1)
 | 16-21 | transform (`float32`) | **reserved**, the identity: 1, 0, 0, 1, 0, 0. The curves already include `Layer.Transform` |
 | 22-23 | | **reserved**, 0 |
 
-A writer sets reserved fields to the given values. A reader of version 1 ignores
-them.
+A layer with a gradient kind uses words 12 to 22 in a different way:
+
+| Word | Field | Content |
+|---|---|---|
+| 12 | `stops` | the word in `Bands()` of the first stop |
+| 13 | `info` | stop count in bits 0-15; spread in bits 16-23 (0 pad, 1 repeat, 2 reflect); bit 24: mix with premultiplied alpha |
+| 14-15 | `a`, `b` (`float32`) | radial: `r0`, `r1`; sweep: `start`, `end`, in radians; linear: 0 |
+| 16-21 | `toPaint` (`float32`) | the matrix a, b, c, d, e, f from em space to paint space. It includes `Layer.Transform` |
+| 22 | `cx` (`float32`) | radial: 0 or 1; else 0 |
+
+### Stops
+
+One stop is 5 words in `Bands()`, as `float32` bits: offset, red, green, blue, alpha.
+The color is straight RGB in sRGB, with linear alpha. The offsets do not fall. Colors
+mix in sRGB.
+
+### Gradient evaluation
+
+A reader finds `p = toPaint * coord`, then `t` from the kind:
+
+| Kind | `t` |
+|---|---|
+| linear | `p.x` |
+| radial | the larger root of the circles with center `(t * cx, 0)` and radius `a + t * (b - a)` that has a radius of at least 0. If there is no such root, the color is transparent |
+| sweep | the angle of `p` from `a` in the direction of `b`, from 0 to one turn, divided by `abs(b - a)` |
+
+Then the spread changes `t`. Repeat and reflect use the range 0 to 1. Pad does not
+change `t`. Below the first offset, the color is the first stop. Over the last offset,
+it is the last stop. Between two stops, the color mixes in a straight line.
+
+A writer does not write a gradient that has one stop or no direction. It writes a solid
+paint with the color of the last stop.
+
+A writer sets reserved fields to the given values. A reader ignores them.
 
 ## Encoded bytes
 

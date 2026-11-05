@@ -426,3 +426,17 @@ func TestPackDrawingWithoutCurves(t *testing.T) {
 		t.Errorf("Lookup did not find the entry")
 	}
 }
+
+// The stops are in the bands, so a failed Add must also remove them.
+func TestPackFullRemovesGradientStops(t *testing.T) {
+	d := Drawing{Em: rasterEm, Layers: []Layer{{Path: squarePath(0, 0, 8), Paint: LinearPaint(Point{0, 0}, Point{8, 0}, ramp...)}}}
+	var size Pack
+	mustAdd(t, &size, 1, d)
+	p := Pack{MaxBytes: size.Size() - 1}
+	if _, err := p.Add(Key{ID: 1}, d); !errors.Is(err, ErrPackFull) {
+		t.Fatalf("err = %v, want ErrPackFull", err)
+	}
+	if p.Size() != 0 {
+		t.Errorf("the pack has %d bytes", p.Size())
+	}
+}
