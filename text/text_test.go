@@ -1,6 +1,7 @@
 package text
 
 import (
+	"image"
 	"slices"
 	"testing"
 
@@ -605,6 +606,121 @@ func TestShapeCacheSpans(t *testing.T) {
 			t.Errorf("%s: the cache returned the lines of another key", name)
 		}
 	}
+}
+
+// styledInk draws g with f, and returns the pixels with ink and the box of the ink.
+func styledInk(t *testing.T, f *Font, g Glyph) (*image.RGBA, int, image.Rectangle) {
+	t.Helper()
+	var pack slug.Pack
+	e, err := f.Add(&pack, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 160, 160))
+	if err := pack.Rasterize(e, slug.Affine{128, 0, 0, 128, 16, 16}, [4]float32{1, 1, 1, 1}, img); err != nil {
+		t.Fatal(err)
+	}
+	ink, box := 0, image.Rectangle{}
+	for y := range 160 {
+		for x := range 160 {
+			if img.Pix[img.PixOffset(x, y)+3] > 128 {
+				ink++
+				box = box.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	return img, ink, box
+}
+
+// Fonts of the two formats wind in opposite ways. A wrong winding erases the part of
+// the bold that overlaps the fill, and fills the hole of the letter.
+func TestStyledFontKeepsTheHoleOfALetter(t *testing.T) {
+	for _, name := range []string{"common/DejaVuSans.ttf", "common/Raleway-v4020-Regular.otf"} {
+		t.Run(name, func(t *testing.T) {
+			f := load(t, name)
+			g := f.Shape("o", Options{})[0].Glyphs[0]
+			_, fill, box := styledInk(t, f, g)
+			center := image.Pt((box.Min.X+box.Max.X)/2, (box.Min.Y+box.Max.Y)/2)
+
+			bold, boldInk, boldBox := styledInk(t, f.Styled(Style{Bold: 0.03}, 8), g)
+			if boldInk <= fill || !boldBox.Eq(boldBox.Union(box)) {
+				t.Errorf("bold has %d pixels in %v, and the fill has %d in %v", boldInk, boldBox, fill, box)
+			}
+			if a := bold.RGBAAt(center.X, center.Y).A; a != 0 {
+				t.Errorf("bold fills the hole with alpha %d", a)
+			}
+
+			line, lineInk, lineBox := styledInk(t, f.Styled(Style{Outline: 0.01, Join: slug.RoundJoin}, 9), g)
+			if lineInk >= fill || lineInk == 0 || lineBox.Dx() < box.Dx() {
+				t.Errorf("the outline has %d pixels in %v, and the fill has %d in %v", lineInk, lineBox, fill, box)
+			}
+			if a := line.RGBAAt(center.X, center.Y).A; a != 0 {
+				t.Errorf("the outline fills the hole with alpha %d", a)
+			}
+		})
+	}
+}
+
+// The slant turns around the baseline, so the top moves and the baseline stays.
+func TestStyledFontSlants(t *testing.T) {
+	f := raleway(t)
+	g := f.Shape("I", Options{})[0].Glyphs[0]
+	_, _, upright := styledInk(t, f, g)
+	_, _, slanted := styledInk(t, f.Styled(Style{Slant: 0.2}, 8), g)
+	if slanted.Min.X != upright.Min.X || slanted.Dx() <= upright.Dx() {
+		t.Errorf("the box goes from %v to %v", upright, slanted)
+	}
+}
+
+// A style has its own key, or the Pack returns the fill for the outline. The fallback
+// font keeps its own outline, because the ID has no meaning in another font.
+func TestStyledFontAddsWithItsOwnKey(t *testing.T) {
+	latin, hebrew, fam := latinAndHebrew(t)
+	line := fam.Shape("aא", Options{})[0]
+	bold := latin.Styled(Style{Bold: 0.02}, 8)
+
+	var pack slug.Pack
+	fill, err := latin.Add(&pack, line.Glyphs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	styled, err := bold.Add(&pack, line.Glyphs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if styled.Key != (slug.Key{Source: 8, ID: line.Glyphs[0].ID}) || styled.Key == fill.Key {
+		t.Errorf("the keys are %v and %v", fill.Key, styled.Key)
+	}
+	other, err := bold.Add(&pack, line.Glyphs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Key.Source != hebrew.source {
+		t.Errorf("the fallback glyph has source %d", other.Key.Source)
+	}
+}
+
+// A Family finds the font of a run by its face, so a styled font needs its own.
+func TestSpanUsesTheStyledFont(t *testing.T) {
+	f := raleway(t)
+	bold := f.Styled(Style{Bold: 0.02}, 8)
+	line := f.self.ShapeSpans([]Span{{Text: "a"}, {Text: "a", Family: &bold.self}}, Options{})[0]
+	if line.Glyphs[0].Font != f || line.Glyphs[1].Font != bold {
+		t.Errorf("the fonts are %p and %p", line.Glyphs[0].Font, line.Glyphs[1].Font)
+	}
+	if line.Glyphs[1].Advance != line.Glyphs[0].Advance {
+		t.Errorf("the advances are %v and %v", line.Glyphs[0].Advance, line.Glyphs[1].Advance)
+	}
+}
+
+func TestStyledRejectsTheSameSource(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("a style with the source of its font did not panic")
+		}
+	}()
+	f := raleway(t)
+	f.Styled(Style{Bold: 0.02}, f.source)
 }
 
 func BenchmarkShapeCache(b *testing.B) {

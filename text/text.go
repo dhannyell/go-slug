@@ -47,6 +47,8 @@ type Font struct {
 	breaks   segmenter.Segmenter
 	carets   *harfbuzz.Font // made at the first ligature; reads the GDEF table
 	self     Family         // this font alone
+	base     *Font          // the parsed font of a styled font; nil for a parsed font
+	style    Style
 }
 
 // Parse parses a TrueType or OpenType font. source is the Key.Source of the
@@ -446,9 +448,10 @@ func (l Line) ClusterAt(x float32) int {
 
 // Add puts the outline of g into p, and returns its Entry. A glyph without
 // contours, such as a space, has no layers. It reads the outline from g.Font, so the
-// result is correct also if f is another font of the Family.
+// result is correct also if f is another font of the Family. If g.Font and f differ
+// only in style, Add uses the style of f, so one line can draw twice: fill and outline.
 func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
-	if g.Font != nil && g.Font != f {
+	if g.Font != nil && g.Font.parsed() != f.parsed() {
 		return g.Font.Add(p, g)
 	}
 	key := slug.Key{Source: f.source, ID: g.ID}
@@ -459,7 +462,11 @@ func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
 	if err != nil {
 		return slug.Entry{}, fmt.Errorf("text: %w", err)
 	}
-	return p.Add(key, outline.Drawing)
+	drawing, err := f.style.apply(outline.Drawing)
+	if err != nil {
+		return slug.Entry{}, fmt.Errorf("text: %w", err)
+	}
+	return p.Add(key, drawing)
 }
 
 // At returns the matrix from the em space of g to a Y-down space, in which the
