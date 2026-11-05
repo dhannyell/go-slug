@@ -3,7 +3,7 @@ module github.com/dhannyell/go-slug/samples
 go 1.26.8
 
 require (
-	github.com/dhannyell/go-slug v1.1.0
+	github.com/dhannyell/go-slug v1.3.0
 	github.com/dhannyell/webgpu v1.35.2
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.1.0.20260628091122-0bd588dc30cf
 	golang.org/x/image v0.43.0
