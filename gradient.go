@@ -128,22 +128,71 @@ type layerGradient struct {
 	premultiplied bool
 }
 
-// gradientColor returns the straight color of a gradient layer at coord. It is the
-// oracle of slug_paint in slug_core.wgsl.
-func (p *Pack) gradientColor(kind PaintKind, g *layerGradient, coord Point) [4]float32 {
-	at := g.toPaint.Apply(coord)
-	var t float32
-	switch kind {
-	case LinearGradient:
-		t = at.X
-	case RadialGradient:
-		var ok bool
-		if t, ok = radialT(at, g.a, g.b, g.cx); !ok {
-			return [4]float32{}
+// The samples of a gradient in one pixel, in pixels from its center.
+var gradientSamples = [4]Point{{-1. / 8, -3. / 8}, {3. / 8, -1. / 8}, {1. / 8, 3. / 8}, {-3. / 8, 1. / 8}}
+
+// One pixel is smooth if its t range is at most smoothRange and the colors at the ends
+// of the range differ by at most smoothColor. A larger range can hold a stripe that
+// the two ends do not show.
+const (
+	smoothRange = 1. / 8
+	smoothColor = 1. / 64
+)
+
+// gradientColor returns the straight color of a gradient layer at coord, filtered over
+// a pixel of size ems. It is the oracle of slug_paint in slug_core.wgsl.
+//
+// t is cheap and a stop search is not. The ends of the t range find an edge in any
+// direction, so most pixels search two times.
+func (p *Pack) gradientColor(kind PaintKind, g *layerGradient, coord, ems Point) [4]float32 {
+	var ts [4]float32
+	var ok [4]bool
+	valid, lo, hi := 0, 0, 0
+	for i, o := range gradientSamples {
+		at := g.toPaint.Apply(Point{coord.X + o.X*ems.X, coord.Y + o.Y*ems.Y})
+		ts[i], ok[i] = gradientT(kind, g, at)
+		if ok[i] {
+			valid++
+			if ts[i] < ts[lo] {
+				lo = i
+			}
+			if ts[i] > ts[hi] {
+				hi = i
+			}
 		}
-	case SweepGradient:
-		t = sweepT(at, g.a, g.b)
 	}
+	if valid == 0 {
+		return [4]float32{}
+	}
+	if valid == 4 && ts[hi]-ts[lo] <= smoothRange {
+		a, b := p.spreadColor(g, ts[lo]), p.spreadColor(g, ts[hi])
+		if nearColors(a, b) {
+			var sum [4]float32
+			addPremultiplied(&sum, a)
+			addPremultiplied(&sum, b)
+			return resolvePremultiplied(sum, 2)
+		}
+	}
+	var sum [4]float32
+	for i := range ts {
+		if ok[i] {
+			addPremultiplied(&sum, p.spreadColor(g, ts[i]))
+		}
+	}
+	return resolvePremultiplied(sum, 4)
+}
+
+func gradientT(kind PaintKind, g *layerGradient, at Point) (float32, bool) {
+	switch kind {
+	case RadialGradient:
+		return radialT(at, g.a, g.b, g.cx)
+	case SweepGradient:
+		return sweepT(at, g.a, g.b), true
+	}
+	return at.X, true
+}
+
+func (p *Pack) spreadColor(g *layerGradient, t float32) [4]float32 {
 	switch g.spread {
 	case Repeat:
 		t -= float32(math.Floor(float64(t)))
@@ -154,6 +203,30 @@ func (p *Pack) gradientColor(kind PaintKind, g *layerGradient, coord Point) [4]f
 		}
 	}
 	return p.stopColor(g, t)
+}
+
+func nearColors(a, b [4]float32) bool {
+	for i := range a {
+		if abs32(a[i]-b[i]) > smoothColor {
+			return false
+		}
+	}
+	return true
+}
+
+func addPremultiplied(sum *[4]float32, c [4]float32) {
+	for i := range 3 {
+		sum[i] += c[i] * c[3]
+	}
+	sum[3] += c[3]
+}
+
+// resolvePremultiplied returns the straight color of a sum of n samples.
+func resolvePremultiplied(sum [4]float32, n float32) [4]float32 {
+	if sum[3] <= 0 {
+		return [4]float32{}
+	}
+	return [4]float32{sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3], sum[3] / n}
 }
 
 // radialT returns the larger t whose circle has a radius of at least 0 and passes

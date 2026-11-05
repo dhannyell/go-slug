@@ -20,8 +20,7 @@ const nearZero = 1.0 / 65536
 // Rasterize draws all layers of e over dst, in order. view maps em space to
 // dst pixels; it usually flips Y, because em space is Y-up and dst is Y-down.
 // color is the color of a CurrentColor layer. It is straight RGB, like
-// Paint.Color. Rasterize blends in sRGB, and it evaluates a gradient at the center of
-// each pixel.
+// Paint.Color. Rasterize blends in sRGB.
 func (p *Pack) Rasterize(e Entry, view Affine, color [4]float32, dst *image.RGBA) error {
 	inverse, ok := view.Invert()
 	if !ok {
@@ -36,9 +35,10 @@ func (p *Pack) Rasterize(e Entry, view Affine, color [4]float32, dst *image.RGBA
 		if l.kind == Solid {
 			c = l.color
 		}
+		ems := emPerPixel(inverse)
 		p.eachPixel(l, view, inverse, dst.Bounds(), func(x, y int, coord Point, cov float32) {
 			if l.kind >= LinearGradient {
-				c = p.gradientColor(l.kind, &l.gradient, coord)
+				c = p.gradientColor(l.kind, &l.gradient, coord, ems)
 			}
 			blendOver(dst.Pix[dst.PixOffset(x, y):][:4:4], c, cov)
 		})

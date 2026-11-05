@@ -26,6 +26,12 @@ const SLUG_REFLECT = 2u;
 const SLUG_STOP_WORDS = 5u;
 const SLUG_TAU = 6.283185307179586;
 
+// One pixel is smooth if its t range is at most SLUG_SMOOTH_RANGE and the colors at the
+// ends of the range differ by at most SLUG_SMOOTH_COLOR. A larger range can hold a
+// stripe that the two ends do not show.
+const SLUG_SMOOTH_RANGE = 0.125;
+const SLUG_SMOOTH_COLOR = 0.015625;
+
 struct SlugLayer {
     band_loc: u32,
     n_h: u32,
@@ -248,35 +254,8 @@ fn slug_sweep_t(at: vec2f, start: f32, end: f32) -> f32 {
     return angle / span;
 }
 
-// slug_paint returns the straight color of layer i at coord, in em space. current is
-// the color of a CurrentColor layer. A host that does not call it draws a gradient
-// with its own color.
-fn slug_paint(i: u32, l: SlugLayer, coord: vec2f, current: vec4f) -> vec4f {
-    if l.kind == SLUG_SOLID {
-        return l.color;
-    }
-    if l.kind < SLUG_LINEAR || l.kind > SLUG_SWEEP {
-        return current;
-    }
-    let r = i * 24u;
-    let first = slug_layer(r + 12u);
-    let info = slug_layer(r + 13u);
-    let at = vec2f(
-        slug_layer_f32(r + 16u) * coord.x + slug_layer_f32(r + 18u) * coord.y + slug_layer_f32(r + 20u),
-        slug_layer_f32(r + 17u) * coord.x + slug_layer_f32(r + 19u) * coord.y + slug_layer_f32(r + 21u),
-    );
-    let a = slug_layer_f32(r + 14u);
-    let b = slug_layer_f32(r + 15u);
-    var t = at.x;
-    if l.kind == SLUG_RADIAL {
-        let radial = slug_radial_t(at, a, b, slug_layer_f32(r + 22u));
-        if radial.y == 0.0 {
-            return vec4f(0.0);
-        }
-        t = radial.x;
-    } else if l.kind == SLUG_SWEEP {
-        t = slug_sweep_t(at, a, b);
-    }
+fn slug_spread_color(first: u32, info: u32, t_in: f32) -> vec4f {
+    var t = t_in;
     let spread = (info >> 16u) & 0xFFu;
     if spread == SLUG_REPEAT {
         t -= floor(t);
@@ -287,6 +266,85 @@ fn slug_paint(i: u32, l: SlugLayer, coord: vec2f, current: vec4f) -> vec4f {
         }
     }
     return slug_gradient_stop(first, info & 0xFFFFu, t, ((info >> 24u) & 1u) != 0u);
+}
+
+fn slug_premultiply(c: vec4f) -> vec4f {
+    return vec4f(c.rgb * c.a, c.a);
+}
+
+// slug_resolve returns the straight color of a sum of n premultiplied samples.
+fn slug_resolve(sum: vec4f, n: f32) -> vec4f {
+    if sum.a <= 0.0 {
+        return vec4f(0.0);
+    }
+    return vec4f(sum.rgb / sum.a, sum.a / n);
+}
+
+// slug_paint returns the straight color of layer i at coord, in em space, filtered over
+// one pixel. pixels_per_em is the value of slug_coverage. current is the color of a
+// CurrentColor layer. A host that does not call it draws a gradient with its own color.
+//
+// t is cheap and a stop search is not. The ends of the t range find an edge in any
+// direction, so most pixels search two times.
+fn slug_paint(i: u32, l: SlugLayer, coord: vec2f, pixels_per_em: vec2f, current: vec4f) -> vec4f {
+    if l.kind == SLUG_SOLID {
+        return l.color;
+    }
+    if l.kind < SLUG_LINEAR || l.kind > SLUG_SWEEP {
+        return current;
+    }
+    const SAMPLES = array(vec2f(-0.125, -0.375), vec2f(0.375, -0.125), vec2f(0.125, 0.375), vec2f(-0.375, 0.125));
+    let r = i * 24u;
+    let first = slug_layer(r + 12u);
+    let info = slug_layer(r + 13u);
+    let a = slug_layer_f32(r + 14u);
+    let b = slug_layer_f32(r + 15u);
+    let cx = slug_layer_f32(r + 22u);
+    let m0 = vec3f(slug_layer_f32(r + 16u), slug_layer_f32(r + 18u), slug_layer_f32(r + 20u));
+    let m1 = vec3f(slug_layer_f32(r + 17u), slug_layer_f32(r + 19u), slug_layer_f32(r + 21u));
+
+    var ts: array<vec2f, 4>; // t, and 1 if it exists
+    var valid = 0u;
+    var lo = 0u;
+    var hi = 0u;
+    for (var j = 0u; j < 4u; j++) {
+        let p = vec3f(coord + SAMPLES[j] / pixels_per_em, 1.0);
+        let at = vec2f(dot(m0, p), dot(m1, p));
+        var t = vec2f(at.x, 1.0);
+        if l.kind == SLUG_RADIAL {
+            t = slug_radial_t(at, a, b, cx);
+        } else if l.kind == SLUG_SWEEP {
+            t = vec2f(slug_sweep_t(at, a, b), 1.0);
+        }
+        ts[j] = t;
+        if t.y != 0.0 {
+            valid++;
+            if t.x < ts[lo].x {
+                lo = j;
+            }
+            if t.x > ts[hi].x {
+                hi = j;
+            }
+        }
+    }
+    if valid == 0u {
+        return vec4f(0.0);
+    }
+    if valid == 4u && ts[hi].x - ts[lo].x <= SLUG_SMOOTH_RANGE {
+        let c0 = slug_spread_color(first, info, ts[lo].x);
+        let c1 = slug_spread_color(first, info, ts[hi].x);
+        let d = abs(c0 - c1);
+        if max(max(d.r, d.g), max(d.b, d.a)) <= SLUG_SMOOTH_COLOR {
+            return slug_resolve(slug_premultiply(c0) + slug_premultiply(c1), 2.0);
+        }
+    }
+    var sum = vec4f(0.0);
+    for (var j = 0u; j < 4u; j++) {
+        if ts[j].y != 0.0 {
+            sum += slug_premultiply(slug_spread_color(first, info, ts[j].x));
+        }
+    }
+    return slug_resolve(sum, 4.0);
 }
 
 // slug_dilate moves a corner of a layer box out by half of fwidth(coord): a

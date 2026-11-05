@@ -114,6 +114,11 @@ Then the spread changes `t`. Repeat and reflect use the range 0 to 1. Pad does n
 change `t`. Below the first offset, the color is the first stop. Over the last offset,
 it is the last stop. Between two stops, the color mixes in a straight line.
 
+A reader can filter over a pixel, so an edge between two colors is smooth. `slug_paint`
+and `Pack.Rasterize` take four samples in each pixel, at (-1/8, -3/8), (3/8, -1/8),
+(1/8, 3/8) and (-3/8, 1/8) pixels from its center. A missing root gives a transparent
+sample. The samples mix with premultiplied alpha.
+
 A writer does not write a gradient that has one stop or no direction. It writes a solid
 paint with the color of the last stop.
 

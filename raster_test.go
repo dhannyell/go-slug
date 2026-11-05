@@ -407,6 +407,8 @@ func TestGradientValues(t *testing.T) {
 		{"sweep backward", SweepPaint(Point{16, 16}, 2*math.Pi, 0, ramp...), 16, 28, 0.75},
 		{"hard stop low", LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0.5, black}, Stop{0.5, white}), 15, 3, 0},
 		{"hard stop high", LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0.5, black}, Stop{0.5, white}), 16, 3, 1},
+		{"hard stop inside", LinearPaint(Point{0, 0}, Point{33, 0}, Stop{0.5, black}, Stop{0.5, white}), 16, 3, 0.5},
+		{"repeat seam", withSpread(LinearPaint(Point{0, 0}, Point{8.5, 0}, ramp...), Repeat), 8, 3, 0.5},
 		{"no direction", LinearPaint(Point{8, 8}, Point{8, 8}, ramp...), 3, 3, 1},
 		{"one stop", RadialPaint(Point{8, 8}, 0, Point{8, 8}, 8, Stop{0, white}), 3, 3, 1},
 	}
@@ -433,8 +435,8 @@ func TestRadialGradientOnItsCircle(t *testing.T) {
 				transparent++
 				continue
 			}
-			if c.R == 0 || c.R == 255 {
-				continue // a pad color does not tell its t
+			if c.A != 255 || c.R < 26 || c.R > 229 {
+				continue // the filter mixes a border with transparent, and a value near a pad with the pad
 			}
 			painted++
 			v := float64(c.R) / 255
@@ -536,5 +538,43 @@ func TestInvalidGradients(t *testing.T) {
 		if p.Size() != 0 {
 			t.Errorf("%s: the pack has %d bytes", name, p.Size())
 		}
+	}
+}
+
+// The edge of a circle has each direction. A test of two samples misses some of them.
+func TestGradientEdgeIsSmoothInEachDirection(t *testing.T) {
+	const radius = 10
+	img := gradientImage(t, RadialPaint(Point{16, 16}, 0, Point{16, 16}, radius*2, Stop{0.5, black}, Stop{0.5, white}))
+	checked := 0
+	for y := range 32 {
+		for x := range 32 {
+			dist := math.Hypot(float64(x)+0.5-16, float64(y)+0.5-16)
+			if math.Abs(dist-radius) > 0.1 {
+				continue
+			}
+			checked++
+			if v := img.RGBAAt(x, y).R; v == 0 || v == 255 {
+				t.Errorf("pixel %d,%d on the edge has gray %d", x, y, v)
+			}
+		}
+	}
+	if checked < 8 {
+		t.Errorf("the edge has %d pixels", checked)
+	}
+}
+
+// The border of a cone is an edge to transparent, so it needs a partial alpha.
+func TestRadialConeBorderIsSmooth(t *testing.T) {
+	img := gradientImage(t, RadialPaint(Point{4, 16}, 0, Point{20, 16}, 8, ramp...))
+	partial := 0
+	for y := range 32 {
+		for x := range 32 {
+			if a := img.RGBAAt(x, y).A; a > 0 && a < 255 {
+				partial++
+			}
+		}
+	}
+	if partial == 0 {
+		t.Error("the border of the cone has no partial alpha")
 	}
 }
