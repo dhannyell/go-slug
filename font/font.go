@@ -83,12 +83,15 @@ func (f *Font) Glyph(id uint32) (Glyph, error) {
 		return g, nil
 	}
 
-	// sfnt leaves contours open; the Path contract closes them.
+	// sfnt leaves contours open. Close them, because a stroke puts caps on an open contour.
 	var p slug.Path
-	for _, s := range segs {
+	for i, s := range segs {
 		a := s.Args
 		switch s.Op {
 		case sfnt.SegmentOpMoveTo:
+			if i > 0 {
+				p.Close()
+			}
 			p.MoveTo(point(a[0]))
 		case sfnt.SegmentOpLineTo:
 			p.LineTo(point(a[0]))
@@ -98,6 +101,7 @@ func (f *Font) Glyph(id uint32) (Glyph, error) {
 			p.CubeTo(point(a[0]), point(a[1]), point(a[2]))
 		}
 	}
+	p.Close()
 	g.Drawing.Layers = []slug.Layer{{Path: p}}
 	return g, nil
 }

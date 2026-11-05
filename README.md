@@ -44,7 +44,9 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
   the oracle of the WGSL code.
 - **Optional text shaping.** The [`text`](text) module adds kerning, ligatures,
   right-to-left text, line breaks, alignment, font fallback, styled spans, line metrics
-  and caret positions.
+  caret positions and synthetic bold, slant and outline.
+- **Strokes.** `Path.Stroke` turns a line into a fill, with caps and joins, and
+  `Path.Embolden` moves the edges of a shape out.
 
 ## Install
 
@@ -205,6 +207,20 @@ ellipsis. For the size of a line, `Line` has `Ascent`, `Descent` and `Gap`, and
 font and of all its runs. For a text field, `Line.XOf` gives the X of a caret,
 `Line.ClusterAt` gives the rune at a pointer, and `Line.NextStop` and `Line.PrevStop`
 move the caret over one grapheme.
+
+A font without a bold or italic file can get a synthetic style. `Styled` returns a font
+with the same glyph IDs and its own source, so it also works as the `Family` of a span.
+To draw a fill and an outline, shape once and add each glyph to each font:
+
+```go
+fill := f
+line := f.Styled(text.Style{Outline: 0.02, Join: slug.RoundJoin}, 1)
+for _, g := range fill.Shape("office", text.Options{})[0].Glyphs {
+	under, err := line.Add(&pack, g)
+	over, err := fill.Add(&pack, g)
+	// Draw under in one color, then over in another color, both with g.At(size).
+}
+```
 
 A game that draws the same labels in each frame can keep the results in a `ShapeCache`.
 The cache and its callers share each result, so a caller must not change it. A text
