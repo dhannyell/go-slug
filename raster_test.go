@@ -409,6 +409,9 @@ func TestGradientValues(t *testing.T) {
 		{"hard stop high", LinearPaint(Point{0, 0}, Point{32, 0}, Stop{0.5, black}, Stop{0.5, white}), 16, 3, 1},
 		{"hard stop inside", LinearPaint(Point{0, 0}, Point{33, 0}, Stop{0.5, black}, Stop{0.5, white}), 16, 3, 0.5},
 		{"repeat seam", withSpread(LinearPaint(Point{0, 0}, Point{8.5, 0}, ramp...), Repeat), 8, 3, 0.5},
+		{"sweep seam", SweepPaint(Point{16, 16.5}, 0, 2*math.Pi, ramp...), 24, 16, 0.5},
+		{"stripes under a pixel", withSpread(LinearPaint(Point{0, 0}, Point{0.25, 0}, ramp...), Repeat), 9, 3, 0.5},
+		{"reflect stripes under a pixel", withSpread(LinearPaint(Point{0, 0}, Point{0.25, 0}, ramp...), Reflect), 9, 3, 0.5},
 		{"no direction", LinearPaint(Point{8, 8}, Point{8, 8}, ramp...), 3, 3, 1},
 		{"one stop", RadialPaint(Point{8, 8}, 0, Point{8, 8}, 8, Stop{0, white}), 3, 3, 1},
 	}

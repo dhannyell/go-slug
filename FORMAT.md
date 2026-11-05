@@ -115,9 +115,10 @@ change `t`. Below the first offset, the color is the first stop. Over the last o
 it is the last stop. Between two stops, the color mixes in a straight line.
 
 A reader can filter over a pixel, so an edge between two colors is smooth. `slug_paint`
-and `Pack.Rasterize` take four samples in each pixel, at (-1/8, -3/8), (3/8, -1/8),
-(1/8, 3/8) and (-3/8, 1/8) pixels from its center. A missing root gives a transparent
-sample. The samples mix with premultiplied alpha.
+and `Pack.Rasterize` take the mean of the stops over the `t` range of the pixel. The
+width of the range is the length of the gradient of `t` over one pixel. The mean uses
+premultiplied alpha. The border of a radial cone sets the alpha from the distance to
+the border.
 
 A writer does not write a gradient that has one stop or no direction. It writes a solid
 paint with the color of the last stop.

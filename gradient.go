@@ -128,139 +128,205 @@ type layerGradient struct {
 	premultiplied bool
 }
 
-// The samples of a gradient in one pixel, in pixels from its center.
-var gradientSamples = [4]Point{{-1. / 8, -3. / 8}, {3. / 8, -1. / 8}, {1. / 8, 3. / 8}, {-3. / 8, 1. / 8}}
-
-// One pixel is smooth if its t range is at most smoothRange and the colors at the ends
-// of the range differ by at most smoothColor. A larger range can hold a stripe that
-// the two ends do not show.
-const (
-	smoothRange = 1. / 8
-	smoothColor = 1. / 64
-)
-
 // gradientColor returns the straight color of a gradient layer at coord, filtered over
 // a pixel of size ems. It is the oracle of slug_paint in slug_core.wgsl.
 //
-// t is cheap and a stop search is not. The ends of the t range find an edge in any
-// direction, so most pixels search two times.
+// The color is the mean of the stops over the t range of the pixel, in closed form. A
+// jump of color then has no steps, and the cost does not depend on the jump.
 func (p *Pack) gradientColor(kind PaintKind, g *layerGradient, coord, ems Point) [4]float32 {
-	var ts [4]float32
-	var ok [4]bool
-	valid, lo, hi := 0, 0, 0
-	for i, o := range gradientSamples {
-		at := g.toPaint.Apply(Point{coord.X + o.X*ems.X, coord.Y + o.Y*ems.Y})
-		ts[i], ok[i] = gradientT(kind, g, at)
-		if ok[i] {
-			valid++
-			if ts[i] < ts[lo] {
-				lo = i
-			}
-			if ts[i] > ts[hi] {
-				hi = i
-			}
-		}
-	}
-	if valid == 0 {
-		return [4]float32{}
-	}
-	if valid == 4 && ts[hi]-ts[lo] <= smoothRange {
-		a, b := p.spreadColor(g, ts[lo]), p.spreadColor(g, ts[hi])
-		if nearColors(a, b) {
-			var sum [4]float32
-			addPremultiplied(&sum, a)
-			addPremultiplied(&sum, b)
-			return resolvePremultiplied(sum, 2)
-		}
-	}
-	var sum [4]float32
-	for i := range ts {
-		if ok[i] {
-			addPremultiplied(&sum, p.spreadColor(g, ts[i]))
-		}
-	}
-	return resolvePremultiplied(sum, 4)
-}
+	at := g.toPaint.Apply(coord)
+	m := g.toPaint
+	// The change of at for one pixel in x, and for one pixel in y.
+	du, dv := Point{m[0] * ems.X, m[1] * ems.X}, Point{m[2] * ems.Y, m[3] * ems.Y}
 
-func gradientT(kind PaintKind, g *layerGradient, at Point) (float32, bool) {
+	var t, w, period float32
+	cover := float32(1)
 	switch kind {
 	case RadialGradient:
-		return radialT(at, g.a, g.b, g.cx)
+		t, w, cover = radialPixel(at, du, dv, g.a, g.b, g.cx)
+		if cover <= 0 {
+			return [4]float32{}
+		}
 	case SweepGradient:
-		return sweepT(at, g.a, g.b), true
-	}
-	return at.X, true
-}
-
-func (p *Pack) spreadColor(g *layerGradient, t float32) [4]float32 {
-	switch g.spread {
-	case Repeat:
-		t -= float32(math.Floor(float64(t)))
-	case Reflect:
-		t -= 2 * float32(math.Floor(float64(t/2)))
-		if t > 1 {
-			t = 2 - t
+		span := abs32(g.b - g.a)
+		t, period = sweepT(at, g.a, g.b), tau/span
+		w = period
+		if r2 := at.X*at.X + at.Y*at.Y; r2 > 0 {
+			w = hypot32(at.X*du.Y-at.Y*du.X, at.X*dv.Y-at.Y*dv.X) / r2 / span
 		}
+	default:
+		t, w = at.X, hypot32(du.X, dv.X)
 	}
-	return p.stopColor(g, t)
-}
 
-func nearColors(a, b [4]float32) bool {
-	for i := range a {
-		if abs32(a[i]-b[i]) > smoothColor {
-			return false
-		}
+	// The range keeps a width at each scale of t.
+	w = max(w, abs32(t)/(1<<21)+1e-20)
+	lo, hi := t-w/2, t+w/2
+	var sum [4]float32
+	switch {
+	case period > 0 && w >= period:
+		lo, hi = 0, period
+		p.addSpread(&sum, g, lo, hi)
+	case period > 0 && lo < 0: // the seam of a sweep
+		p.addSpread(&sum, g, lo+period, period)
+		p.addSpread(&sum, g, 0, hi)
+	case period > 0 && hi > period:
+		p.addSpread(&sum, g, lo, period)
+		p.addSpread(&sum, g, 0, hi-period)
+	default:
+		p.addSpread(&sum, g, lo, hi)
 	}
-	return true
-}
-
-func addPremultiplied(sum *[4]float32, c [4]float32) {
-	for i := range 3 {
-		sum[i] += c[i] * c[3]
-	}
-	sum[3] += c[3]
-}
-
-// resolvePremultiplied returns the straight color of a sum of n samples.
-func resolvePremultiplied(sum [4]float32, n float32) [4]float32 {
 	if sum[3] <= 0 {
 		return [4]float32{}
 	}
-	return [4]float32{sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3], sum[3] / n}
+	return [4]float32{sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3], sum[3] / (hi - lo) * cover}
 }
 
-// radialT returns the larger t whose circle has a radius of at least 0 and passes
-// through at. The circles have the center (t*cx, 0) and the radius r0 + t*(r1-r0).
-func radialT(at Point, r0, r1, cx float32) (float32, bool) {
+// addSpread adds the premultiplied integral of the gradient from lo to hi, with spread.
+func (p *Pack) addSpread(sum *[4]float32, g *layerGradient, lo, hi float32) {
+	if g.spread == Pad {
+		p.addStops(sum, g, lo, hi, 1)
+		return
+	}
+	first := float32(math.Floor(float64(lo)))
+	last := float32(math.Floor(float64(hi)))
+	if first == last {
+		p.addUnit(sum, g, first, lo-first, hi-first)
+		return
+	}
+	p.addUnit(sum, g, first, lo-first, 1)
+	p.addUnit(sum, g, last, 0, hi-last)
+	if whole := last - first - 1; whole > 0 {
+		p.addStops(sum, g, 0, 1, whole)
+	}
+}
+
+// addUnit adds the part from a to b of the unit that starts at the integer n.
+func (p *Pack) addUnit(sum *[4]float32, g *layerGradient, n, a, b float32) {
+	if g.spread == Reflect && n-2*float32(math.Floor(float64(n/2))) != 0 {
+		a, b = 1-b, 1-a
+	}
+	p.addStops(sum, g, a, b, 1)
+}
+
+// addStops adds scale times the premultiplied integral of the stops from a to b. Each
+// segment adds only its own part, so a small range keeps its precision.
+func (p *Pack) addStops(sum *[4]float32, g *layerGradient, a, b, scale float32) {
+	stop := func(i uint32) (float32, [4]float32) {
+		w := p.bands[g.stops+i*stopWords:][:stopWords]
+		f := math.Float32frombits
+		return f(w[0]), [4]float32{f(w[1]), f(w[2]), f(w[3]), f(w[4])}
+	}
+	add := func(c [4]float32, width float32) {
+		for i := range sum {
+			sum[i] += c[i] * width * scale
+		}
+	}
+	premultiply := func(c [4]float32) [4]float32 {
+		return [4]float32{c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]}
+	}
+
+	lo, loColor := stop(0)
+	if a < lo {
+		add(premultiply(loColor), min(b, lo)-a)
+	}
+	for i := uint32(1); i < g.count; i++ {
+		hi, hiColor := stop(i)
+		if x0, x1 := max(a, lo), min(b, hi); x1 > x0 {
+			// x1 is over x0, so the two offsets differ.
+			f0, f1 := (x0-lo)/(hi-lo), (x1-lo)/(hi-lo)
+			add(segmentMean(loColor, hiColor, f0, f1, g.premultiplied), x1-x0)
+		}
+		lo, loColor = hi, hiColor
+	}
+	if b > lo {
+		add(premultiply(loColor), b-max(a, lo))
+	}
+}
+
+// segmentMean returns the premultiplied mean of a segment from f0 to f1. A straight mix
+// has a product of two lines, so its mean has a term for the curve.
+func segmentMean(a, b [4]float32, f0, f1 float32, premultiplied bool) [4]float32 {
+	f := (f0 + f1) / 2
+	alpha := a[3] + (b[3]-a[3])*f
+	c := [4]float32{0, 0, 0, alpha}
+	for i := range 3 {
+		if premultiplied {
+			c[i] = a[i]*a[3] + (b[i]*b[3]-a[i]*a[3])*f
+		} else {
+			curve := (b[i] - a[i]) * (b[3] - a[3]) * (f1 - f0) * (f1 - f0) / 12
+			c[i] = (a[i]+(b[i]-a[i])*f)*alpha + curve
+		}
+	}
+	return c
+}
+
+// radialPixel returns the t of a pixel, the width of its t range, and the part of the
+// pixel inside the cone. The t is the larger t whose circle has a radius of at least 0
+// and passes through at. The circles have the center (t*cx, 0) and the radius
+// r0 + t*(r1-r0). du and dv are the change of at for one pixel.
+func radialPixel(at, du, dv Point, r0, r1, cx float32) (t, w, cover float32) {
 	dr := r1 - r0
 	a := cx*cx - dr*dr
 	b := at.X*cx + r0*dr
 	c := at.X*at.X + at.Y*at.Y - r0*r0
-	var t1, t2 float32
+	db := hypot32(du.X*cx, dv.X*cx)
+
+	var limit float32 // the largest width, near the border of the cone
+	cover = 1
 	if abs32(a) < nearZero {
-		if b == 0 {
-			return 0, false
+		// One root, and the border of the cone is the line b = 0.
+		side := b
+		if dr < 0 {
+			side = -b
 		}
-		t1 = c * 0.5 / b
-		t2 = t1
+		if cover = clamp01(0.5 + side/db); cover <= 0 {
+			return 0, 0, 0
+		}
+		if side < 1e-6 {
+			b = 1e-6
+			if dr < 0 {
+				b = -b
+			}
+		}
+		t = c * 0.5 / b
+		limit = 1e30
 	} else {
 		d := b*b - a*c
-		if d < 0 {
-			return 0, false
+		// The change of d for one pixel.
+		dx := 2 * (b*cx*du.X - a*(at.X*du.X+at.Y*du.Y))
+		dy := 2 * (b*cx*dv.X - a*(at.X*dv.X+at.Y*dv.Y))
+		g := hypot32(dx, dy)
+		if a > 0 {
+			// Nested circles fill the plane, so only a cone has a border.
+			if g > 0 {
+				cover = clamp01(0.5 + d/g)
+			} else if d < 0 {
+				cover = 0
+			}
+			if cover <= 0 {
+				return 0, 0, 0
+			}
 		}
-		s := float32(math.Sqrt(float64(d)))
-		t1, t2 = (b+s)/a, (b-s)/a
-		if t2 > t1 {
-			t1, t2 = t2, t1
+		d = max(d, 0)
+		s := sqrt32(d)
+		t1, t2 := max((b+s)/a, (b-s)/a), min((b+s)/a, (b-s)/a)
+		t = t1
+		if r0+t1*dr < 0 {
+			if r0+t2*dr < 0 {
+				return 0, 0, 0
+			}
+			t = t2
 		}
+		limit = (sqrt32(d+g/2) - sqrt32(max(d-g/2, 0)) + db) / abs32(a)
 	}
-	if r0+t1*dr >= 0 {
-		return t1, true
+
+	// The gradient of t is (at - center) / (b - a*t). It has no limit at the border.
+	w = limit
+	if slope := abs32(b - a*t); slope > 0 {
+		x := at.X - t*cx
+		w = min(limit, hypot32(x*du.X+at.Y*du.Y, x*dv.X+at.Y*dv.Y)/slope)
 	}
-	if r0+t2*dr >= 0 {
-		return t2, true
-	}
-	return 0, false
+	return t, w, cover
 }
 
 // sweepT measures the angle from start in the direction of end, from 0 to one turn.
@@ -275,39 +341,14 @@ func sweepT(at Point, start, end float32) float32 {
 	return angle / span
 }
 
-func (p *Pack) stopColor(g *layerGradient, t float32) [4]float32 {
-	stop := func(i uint32) (float32, [4]float32) {
-		w := p.bands[g.stops+i*stopWords:][:stopWords]
-		f := math.Float32frombits
-		return f(w[0]), [4]float32{f(w[1]), f(w[2]), f(w[3]), f(w[4])}
-	}
-	lo, loColor := stop(0)
-	if t <= lo {
-		return loColor
-	}
-	for i := uint32(1); i < g.count; i++ {
-		hi, hiColor := stop(i)
-		if t <= hi {
-			// t is over lo, so the two offsets differ.
-			return mixStops(loColor, hiColor, (t-lo)/(hi-lo), g.premultiplied)
-		}
-		lo, loColor = hi, hiColor
-	}
-	return loColor
+func hypot32(x, y float32) float32 {
+	return sqrt32(x*x + y*y)
 }
 
-func mixStops(a, b [4]float32, f float32, premultiplied bool) [4]float32 {
-	if !premultiplied {
-		return [4]float32{a[0] + (b[0]-a[0])*f, a[1] + (b[1]-a[1])*f, a[2] + (b[2]-a[2])*f, a[3] + (b[3]-a[3])*f}
-	}
-	alpha := a[3] + (b[3]-a[3])*f
-	if alpha <= 0 {
-		return [4]float32{}
-	}
-	var c [4]float32
-	for i := range 3 {
-		c[i] = (a[i]*a[3] + (b[i]*b[3]-a[i]*a[3])*f) / alpha
-	}
-	c[3] = alpha
-	return c
+func sqrt32(v float32) float32 {
+	return float32(math.Sqrt(float64(v)))
+}
+
+func clamp01(v float32) float32 {
+	return min(max(v, 0), 1)
 }
