@@ -49,7 +49,10 @@ type Font struct {
 	self     Family         // this font alone
 	base     *Font          // the parsed font of a styled font; nil for a parsed font
 	style    Style
-	palette  int // the CPAL palette of the color glyphs
+	palette  int       // the CPAL palette of the color glyphs
+	data     []byte    // the font file; Stamp hashes it
+	digest   *[32]byte // the hash of data, after the first Stamp
+	stamp    *[32]byte // the result of Stamp, after the first call
 }
 
 // Parse parses a TrueType or OpenType font. source is the Key.Source of the
@@ -63,7 +66,7 @@ func Parse(data []byte, source uint32) (*Font, error) {
 	if err != nil {
 		return nil, fmt.Errorf("text: %w", err)
 	}
-	f := &Font{outlines: outlines, face: face, source: source}
+	f := &Font{outlines: outlines, face: face, source: source, data: data}
 	f.self.fonts = []*Font{f}
 	return f, nil
 }
@@ -455,6 +458,9 @@ func (l Line) ClusterAt(x float32) int {
 func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
 	if g.Font != nil && g.Font.parsed() != f.parsed() {
 		return g.Font.Add(p, g)
+	}
+	if err := f.checkStamp(p); err != nil {
+		return slug.Entry{}, err
 	}
 	key := slug.Key{Source: f.source, ID: g.ID}
 	if e, ok := p.Lookup(key); ok {

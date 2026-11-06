@@ -23,6 +23,7 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - [Fill with a gradient](#fill-with-a-gradient)
 - [Shape text](#shape-text)
 - [Limit the memory](#limit-the-memory)
+- [Warm up and bake](#warm-up-and-bake)
 - [Compare with other methods](#compare-with-other-methods)
 - [Limits in 3D](#limits-in-3d)
 - [Samples](#samples)
@@ -270,6 +271,51 @@ if errors.Is(err, slug.ErrPackFull) {
 `Reset` makes each old `Entry` invalid. `Generation` changes at each `Reset`, so a host
 that keeps an `Entry` can know when to get it again. Use a second `Pack` for shapes that
 live for less time, such as a chart.
+
+## Warm up and bake
+
+`Add` converts a glyph the first time that a `Pack` sees it. A frame that shows many
+new glyphs pays for all of them. A `Warmer` spreads this work over many frames:
+
+```go
+warm := font.Warmer(menuText, text.Options{})
+
+// In each frame, until done is true:
+done, err := warm.Step(&pack, time.Millisecond)
+```
+
+A Warmer adds each rune alone and the shaped text, so ligatures enter too. Give it a
+large budget in a loading screen.
+
+A bake does the work before the program runs. The `slugbake` command writes an encoded
+`Pack`, and the program decodes it at the start:
+
+```bash
+go run github.com/dhannyell/go-slug/text/cmd/slugbake@latest -font Inter.ttf -source 1 -runes 20-7E,A0-FF -o ui.slug
+```
+
+```go
+pack, err := slug.Decode(uiSlug)
+font, err := text.Parse(interTTF, 1) // the same source as the bake
+```
+
+The file has a stamp of the font, the style and the palette. If the font changes,
+`Add` returns `text.ErrStalePack`, so the program does not draw old glyphs. Make the
+bake again with the new font.
+
+A baked `Pack` is larger than the font, because it stores data ready for the GPU. Bake
+when the time at the start costs more than the bytes. Measured in WebAssembly on
+Node.js:
+
+| Glyphs | `Add` | `Decode` | Pack, gzip | Font, gzip |
+|---|---|---|---|---|
+| Latin-1, 191 | 8 ms | 0.3 ms | 0.05 MB | 0.39 MB |
+| Kanji, 4982 | 602 ms | 15.5 ms | 3.54 MB | 0.98 MB |
+| Color emoji, 717 | 384 ms | 10.3 ms | 2.88 MB | 7.65 MB |
+
+On a desktop, the file comes from the disk, and the bake saves the time of `Add`. On
+the web, the download of the kanji pack costs more than its time saved, so a Warmer
+is often better.
 
 ## Compare with other methods
 

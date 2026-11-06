@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 )
 
 // ErrInvalidPack reports data that Decode cannot read.
@@ -15,6 +16,7 @@ const (
 	packVersion = 2
 
 	entryWords = 8
+	stampWords = 9 // the source, then 32 bytes
 )
 
 // Section IDs. Decode skips an unknown ID, so a later minor addition does not
@@ -24,6 +26,7 @@ const (
 	sectionBands
 	sectionLayers
 	sectionEntries
+	sectionStamps // optional
 )
 
 // Encode returns the pack as bytes. FORMAT.md describes the bytes.
@@ -44,7 +47,24 @@ func (p *Pack) Encode() []byte {
 	out = appendSection(out, sectionCurves, curves)
 	out = appendSection(out, sectionBands, p.bands)
 	out = appendSection(out, sectionLayers, p.layers)
-	return appendSection(out, sectionEntries, entries)
+	out = appendSection(out, sectionEntries, entries)
+	if len(p.stamps) == 0 {
+		return out
+	}
+	sources := make([]uint32, 0, len(p.stamps))
+	for source := range p.stamps {
+		sources = append(sources, source)
+	}
+	slices.Sort(sources) // the same Pack gives the same bytes
+	stamps := make([]uint32, 0, len(sources)*stampWords)
+	for _, source := range sources {
+		stamp := p.stamps[source]
+		stamps = append(stamps, source)
+		for i := range stampWords - 1 {
+			stamps = append(stamps, binary.LittleEndian.Uint32(stamp[4*i:]))
+		}
+	}
+	return appendSection(out, sectionStamps, stamps)
 }
 
 func appendSection(out []byte, id uint32, words []uint32) []byte {
@@ -78,7 +98,7 @@ func Decode(data []byte) (*Pack, error) {
 		if size%4 != 0 || uint64(size) > uint64(len(rest)) {
 			return nil, fmt.Errorf("%w: section %d has bad size %d", ErrInvalidPack, id, size)
 		}
-		if id >= sectionCurves && id <= sectionEntries {
+		if id >= sectionCurves && id <= sectionStamps {
 			if _, seen := sections[id]; seen {
 				return nil, fmt.Errorf("%w: section %d repeats", ErrInvalidPack, id)
 			}
@@ -93,7 +113,8 @@ func Decode(data []byte) (*Pack, error) {
 	}
 
 	curves, layers, entries := sections[sectionCurves], sections[sectionLayers], sections[sectionEntries]
-	if len(curves)%4 != 0 || len(layers)%LayerWords != 0 || len(entries)%entryWords != 0 {
+	stamps := sections[sectionStamps]
+	if len(curves)%4 != 0 || len(layers)%LayerWords != 0 || len(entries)%entryWords != 0 || len(stamps)%stampWords != 0 {
 		return nil, fmt.Errorf("%w: section size is not a whole record", ErrInvalidPack)
 	}
 
@@ -122,6 +143,17 @@ func Decode(data []byte) (*Pack, error) {
 			return nil, fmt.Errorf("%w: entry %v repeats", ErrInvalidPack, e.Key)
 		}
 		p.register(e)
+	}
+	for i := 0; i < len(stamps); i += stampWords {
+		source := stamps[i]
+		if _, dup := p.Stamp(source); dup {
+			return nil, fmt.Errorf("%w: the stamp of source %d repeats", ErrInvalidPack, source)
+		}
+		var stamp [32]byte
+		for j, w := range stamps[i+1 : i+stampWords] {
+			binary.LittleEndian.PutUint32(stamp[4*j:], w)
+		}
+		p.SetStamp(source, stamp)
 	}
 	return p, nil
 }

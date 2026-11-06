@@ -49,6 +49,28 @@ func TestEncodeRoundTrip(t *testing.T) {
 	}
 }
 
+// A baked Pack carries the stamp of each font, so a reader can reject old glyphs.
+func TestEncodeKeepsStamps(t *testing.T) {
+	p := encodedPack(t)
+	p.SetStamp(9, [32]byte{1, 2, 3})
+	p.SetStamp(0, [32]byte{31: 7})
+
+	got, err := Decode(p.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []uint32{0, 9} {
+		want, _ := p.Stamp(source)
+		if s, ok := got.Stamp(source); !ok || s != want {
+			t.Errorf("the stamp of source %d is %v, %v", source, s, ok)
+		}
+	}
+	got.Reset()
+	if _, ok := got.Stamp(9); ok {
+		t.Error("Reset keeps a stamp")
+	}
+}
+
 // A later minor addition must not break old readers.
 func TestDecodeSkipsUnknownSection(t *testing.T) {
 	p := encodedPack(t)
@@ -93,6 +115,8 @@ func TestDecodeRejectsBadData(t *testing.T) {
 		{"entry outside the layers", withEntries(0, 1, 0, 1, 0, 0, 0, 0)},
 		{"entry range overflows", withEntries(0, 1, 0xFFFFFFFF, 1, 0, 0, 0, 0)},
 		{"repeated key", withEntries(0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0)},
+		{"partial stamp", slices.Concat(good, section(sectionStamps, 1))},
+		{"repeated stamp", slices.Concat(good, section(sectionStamps, make([]uint32, 2*stampWords)...))},
 	}
 	for _, c := range cases {
 		if _, err := Decode(c.data); !errors.Is(err, ErrInvalidPack) {

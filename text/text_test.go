@@ -1,6 +1,7 @@
 package text
 
 import (
+	"errors"
 	"image"
 	"slices"
 	"testing"
@@ -804,5 +805,55 @@ func TestPaletteChangesTheColors(t *testing.T) {
 	}
 	if _, err := f.Palette(f.Palettes(), 9); err == nil {
 		t.Error("a palette past the end has no error")
+	}
+}
+
+// A budget of 0 adds one glyph for each Step, and the shaped text adds its ligature.
+func TestWarmerStepsToTheEnd(t *testing.T) {
+	f := raleway(t)
+	w := f.Warmer("office", Options{})
+	var pack slug.Pack
+	steps := 0
+	for done := false; !done; steps++ {
+		var err error
+		if done, err = w.Step(&pack, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if steps != len(pack.Entries()) {
+		t.Errorf("%d steps added %d glyphs", steps, len(pack.Entries()))
+	}
+	for _, g := range f.Shape("office", Options{})[0].Glyphs {
+		if _, ok := pack.Lookup(slug.Key{Source: f.source, ID: g.ID}); !ok {
+			t.Errorf("glyph %d of the shaped text is not in the pack", g.ID)
+		}
+	}
+}
+
+// A decoded bake gives Add the baked glyphs, and rejects a font that it does not match.
+func TestBakedPackServesAdd(t *testing.T) {
+	f := raleway(t)
+	var baked slug.Pack
+	if err := f.Bake(&baked, "Hello", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := slug.Decode(baked.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := f.Shape("H", Options{})[0].Glyphs[0]
+	e, err := f.Add(p, g)
+	if want, _ := baked.Lookup(e.Key); err != nil || e != want || len(p.Entries()) != len(baked.Entries()) {
+		t.Errorf("Add gives %v, %v, and the pack has %d entries", e, err, len(p.Entries()))
+	}
+
+	// A glyph without a Font is read from the font that adds it.
+	g.Font = nil
+	other := loadSource(t, "common/DejaVuSans.ttf", f.source)
+	if _, err := other.Add(p, g); !errors.Is(err, ErrStalePack) {
+		t.Errorf("another font with the same source gives %v", err)
+	}
+	if _, err := f.Styled(Style{Bold: 0.02}, f.source+1).Add(p, g); err != nil {
+		t.Errorf("a source without a stamp gives %v", err)
 	}
 }
