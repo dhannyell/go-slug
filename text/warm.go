@@ -15,10 +15,10 @@ import (
 var ErrStalePack = errors.New("text: the pack has glyphs of another font")
 
 // stampVersion changes when Add makes other drawings from the same font.
-const stampVersion = 1
+const stampVersion = 2
 
-// Stamp returns a SHA-256 of the font data, the style, the palette and the version of
-// the conversion. Bake writes it into a Pack. The first call hashes the font data.
+// Stamp returns a SHA-256 of the font data, the style, the palette, the values of the
+// axes and the version of the conversion. Bake writes it into a Pack. The first call hashes the font data.
 func (f *Font) Stamp() [32]byte {
 	if f.stamp != nil {
 		return *f.stamp
@@ -38,6 +38,9 @@ func (f *Font) Stamp() [32]byte {
 	}
 	b = binary.LittleEndian.AppendUint32(b, uint32(s.Join))
 	b = binary.LittleEndian.AppendUint32(b, uint32(f.palette))
+	for _, c := range f.face.Coords() {
+		b = binary.LittleEndian.AppendUint16(b, uint16(c))
+	}
 	b = binary.LittleEndian.AppendUint32(b, stampVersion)
 	h.Write(b)
 	f.stamp = new([32]byte)
