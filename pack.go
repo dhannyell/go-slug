@@ -59,6 +59,7 @@ type Pack struct {
 
 	entries []Entry
 	index   map[Key]int
+	stamps  map[uint32][32]byte
 
 	clean      Dirty // End fields only: how much the host has
 	generation uint32
@@ -118,6 +119,7 @@ func (p *Pack) Reset() {
 	p.curves, p.bands, p.layers = p.curves[:0], p.bands[:0], p.layers[:0]
 	p.entries = p.entries[:0]
 	clear(p.index)
+	clear(p.stamps)
 	p.clean = Dirty{}
 	p.generation++
 }
@@ -125,6 +127,22 @@ func (p *Pack) Reset() {
 // Size returns the bytes of the GPU data: Curves, Bands and Layers.
 func (p *Pack) Size() int {
 	return 4 * (len(p.curves) + len(p.bands) + len(p.layers))
+}
+
+// SetStamp records what made the drawings of source, for example a hash of the font
+// and its style. A reader of an encoded Pack compares the stamp before it trusts the
+// entries of source. Reset removes all stamps.
+func (p *Pack) SetStamp(source uint32, stamp [32]byte) {
+	if p.stamps == nil {
+		p.stamps = make(map[uint32][32]byte)
+	}
+	p.stamps[source] = stamp
+}
+
+// Stamp returns the stamp of source, and false if source has none.
+func (p *Pack) Stamp(source uint32) ([32]byte, bool) {
+	s, ok := p.stamps[source]
+	return s, ok
 }
 
 // Generation returns the number of calls to Reset. A host that keeps an Entry

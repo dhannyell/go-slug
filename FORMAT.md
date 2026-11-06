@@ -149,9 +149,12 @@ payload          size bytes
 | 2 | bands | the `Bands()` array |
 | 3 | layers | the `Layers()` array |
 | 4 | entries | 8 words per entry: key source, key ID, first layer, layer count, then bounds as 4 `float32` (min x, min y, max x, max y) |
+| 5 | stamps | optional; 9 words per stamp: key source, then the 32 bytes of `Pack.Stamp`, in ascending order of source |
 
-Sections 1 to 4 must all be present, one time each. A reader skips an unknown
-section ID. A change that an old reader cannot ignore needs a new version.
+Sections 1 to 4 must all be present, one time each. Section 5 is optional, and a
+source has at most one stamp. A reader skips an unknown section ID, so an older
+reader of version 2 skips section 5. A change that an old reader cannot ignore
+needs a new version.
 
 The bytes are not portable as a golden file. Some CPUs fuse float operations,
 so a cubic outline can differ in the last bits between architectures. A decoded
