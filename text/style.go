@@ -1,6 +1,8 @@
 package text
 
 import (
+	"slices"
+
 	gofont "github.com/go-text/typesetting/font"
 
 	slug "github.com/dhannyell/go-slug"
@@ -39,13 +41,14 @@ func (f *Font) Styled(s Style, source uint32) *Font {
 // variant returns a font with the outlines of f and another style or palette.
 func (f *Font) variant(source uint32, s Style, palette int) *Font {
 	// A new face, because a Family finds the font of a run by its face.
+	face := gofont.NewFace(f.face.Font)
+	face.SetCoords(f.face.Coords())
 	v := &Font{
-		outlines: f.outlines,
-		face:     gofont.NewFace(f.face.Font),
-		source:   source,
-		base:     f.parsed(),
-		style:    s,
-		palette:  palette,
+		face:    face,
+		source:  source,
+		base:    f.parsed(),
+		style:   s,
+		palette: palette,
 	}
 	v.self.fonts = []*Font{v}
 	return v
@@ -74,8 +77,24 @@ func (s Style) apply(d slug.Drawing) (slug.Drawing, error) {
 	}
 	if s.Slant != 0 {
 		slant := slug.Affine{1, 0, s.Slant, 1, 0, 0}
+		after := func(t *slug.Affine) *slug.Affine {
+			m := slant
+			if t != nil {
+				m = t.Then(slant)
+			}
+			return &m
+		}
 		for i := range d.Layers {
-			d.Layers[i].Transform = &slant
+			l := &d.Layers[i]
+			l.Transform = after(l.Transform)
+			if l.Clip != nil {
+				// Layers can share a clip: slant a copy.
+				clip := slices.Clone(l.Clip)
+				for k := range clip {
+					clip[k].Transform = after(clip[k].Transform)
+				}
+				l.Clip = clip
+			}
 		}
 	}
 	return d, nil

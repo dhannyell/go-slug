@@ -80,6 +80,6 @@ fn slug_fs(in: SlugVarying) -> @location(0) vec4f {
     let pixels_per_em = 1.0 / max(fwidth(in.coord), vec2f(1e-9));
     let l = slug_layer_at(in.layer);
     let color = slug_paint(in.layer, l, in.coord, pixels_per_em, in.color);
-    let a = color.a * slug_coverage(l, in.coord, pixels_per_em);
+    let a = color.a * slug_coverage(l, in.coord, pixels_per_em) * slug_clip(in.layer, in.coord, pixels_per_em);
     return vec4f(color.rgb * a, a);
 }

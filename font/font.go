@@ -1,5 +1,8 @@
 // Package font reads glyph outlines from TrueType and OpenType fonts as
 // slug Drawings.
+//
+// It uses golang.org/x/image/font/sfnt, which does not read CFF2 fonts, variable
+// fonts or the CFF operators flex and flex1. The text module reads all of them.
 package font
 
 import (

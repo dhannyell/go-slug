@@ -28,6 +28,8 @@ func main() {
 	slant := flag.Float64("slant", 0, "Style.Slant")
 	outline := flag.Float64("outline", 0, "Style.Outline, in em")
 	palette := flag.Int("palette", 0, "the color palette of a COLR font")
+	vary := flag.String("vary", "", "the axes of a variable font, such as wght=700,wdth=80")
+	features := flag.String("features", "", "OpenType features for the text, such as smcp,liga=0")
 	in := flag.String("in", "", "an encoded Pack to add to")
 	out := flag.String("o", "", "the output file (required)")
 	flag.Parse()
@@ -35,20 +37,40 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*fontPath, uint32(*source), *runes, *textPath,
-		text.Style{Bold: float32(*bold), Slant: float32(*slant), Outline: float32(*outline)},
-		*palette, *in, *out); err != nil {
+	o, err := text.ParseFeatures(*features)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "slugbake:", err)
+		os.Exit(2)
+	}
+	axes, err := variations(*vary)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "slugbake:", err)
+		os.Exit(2)
+	}
+	v := variant{
+		style:   text.Style{Bold: float32(*bold), Slant: float32(*slant), Outline: float32(*outline)},
+		palette: *palette,
+		axes:    axes,
+	}
+	if err := run(*fontPath, uint32(*source), *runes, *textPath, v, text.Options{Features: o}, *in, *out); err != nil {
 		fmt.Fprintln(os.Stderr, "slugbake:", err)
 		os.Exit(1)
 	}
 }
 
-func run(fontPath string, source uint32, runes, textPath string, style text.Style, palette int, in, out string) error {
+// variant is the font that the program makes from the parsed font.
+type variant struct {
+	style   text.Style
+	palette int
+	axes    []text.Variation
+}
+
+func run(fontPath string, source uint32, runes, textPath string, v variant, o text.Options, in, out string) error {
 	data, err := os.ReadFile(fontPath)
 	if err != nil {
 		return err
 	}
-	f, err := font(data, source, style, palette)
+	f, err := font(data, source, v)
 	if err != nil {
 		return err
 	}
@@ -76,7 +98,7 @@ func run(fontPath string, source uint32, runes, textPath string, style text.Styl
 		}
 	}
 	before := len(p.Entries())
-	if err := f.Bake(p, str, text.Options{}); err != nil {
+	if err := f.Bake(p, str, o); err != nil {
 		// A glyph that fails stays out of the file; the program adds it at run time.
 		fmt.Fprintln(os.Stderr, "slugbake: warning:", err)
 	}
@@ -89,9 +111,9 @@ func run(fontPath string, source uint32, runes, textPath string, style text.Styl
 }
 
 // font returns the font that the program uses at run time. Its stamp includes the
-// style and the palette, so the program must make the same variant.
-func font(data []byte, source uint32, style text.Style, palette int) (*text.Font, error) {
-	if palette == 0 && style == (text.Style{}) {
+// style, the palette and the axes, so the program must make the same variant.
+func font(data []byte, source uint32, v variant) (*text.Font, error) {
+	if v.palette == 0 && v.style == (text.Style{}) && v.axes == nil {
 		return text.Parse(data, source)
 	}
 	// Each variant needs a source that differs from its font; only the last one is in
@@ -100,12 +122,35 @@ func font(data []byte, source uint32, style text.Style, palette int) (*text.Font
 	if err != nil {
 		return nil, err
 	}
-	if palette != 0 {
-		if f, err = f.Palette(palette, source+2); err != nil {
+	if v.axes != nil {
+		if f, err = f.Vary(v.axes, source+2); err != nil {
 			return nil, err
 		}
 	}
-	return f.Styled(style, source), nil
+	if v.palette != 0 {
+		if f, err = f.Palette(v.palette, source+3); err != nil {
+			return nil, err
+		}
+	}
+	return f.Styled(v.style, source), nil
+}
+
+// variations reads axis values such as "wght=700,wdth=80".
+func variations(s string) ([]text.Variation, error) {
+	var out []text.Variation
+	for part := range strings.SplitSeq(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		tag, value, ok := strings.Cut(part, "=")
+		v, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
+		if !ok || err != nil {
+			return nil, fmt.Errorf("axis %q is not tag=value", part)
+		}
+		out = append(out, text.Variation{Tag: strings.TrimSpace(tag), Value: float32(v)})
+	}
+	return out, nil
 }
 
 // runeText returns one of each rune in ranges such as "20-7E,A0-FF".

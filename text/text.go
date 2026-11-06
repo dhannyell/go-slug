@@ -26,8 +26,9 @@ import (
 	"github.com/go-text/typesetting/shaping"
 	"golang.org/x/image/math/fixed"
 
+	ot "github.com/go-text/typesetting/font/opentype"
+
 	slug "github.com/dhannyell/go-slug"
-	"github.com/dhannyell/go-slug/font"
 )
 
 // shapeSize is the size that the shaper uses. It keeps the fraction of an em in
@@ -38,8 +39,7 @@ const shapeSize = 2048
 //
 // A Font is not safe for concurrent use.
 type Font struct {
-	outlines *font.Font
-	face     *gofont.Face
+	face     *gofont.Face // reads the outlines at the coordinates of the axes
 	source   uint32
 	shaper   shaping.HarfbuzzShaper
 	segments shaping.Segmenter
@@ -50,6 +50,7 @@ type Font struct {
 	base     *Font          // the parsed font of a styled font; nil for a parsed font
 	style    Style
 	palette  int       // the CPAL palette of the color glyphs
+	axes     []Axis    // the axes of a variable font
 	data     []byte    // the font file; Stamp hashes it
 	digest   *[32]byte // the hash of data, after the first Stamp
 	stamp    *[32]byte // the result of Stamp, after the first call
@@ -58,15 +59,11 @@ type Font struct {
 // Parse parses a TrueType or OpenType font. source is the Key.Source of the
 // glyphs of this font in a Pack: use a different value for each font.
 func Parse(data []byte, source uint32) (*Font, error) {
-	outlines, err := font.Parse(data)
-	if err != nil {
-		return nil, fmt.Errorf("text: %w", err)
-	}
 	face, err := gofont.ParseTTF(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("text: %w", err)
 	}
-	f := &Font{outlines: outlines, face: face, source: source, data: data}
+	f := &Font{face: face, source: source, data: data, axes: readAxes(data)}
 	f.self.fonts = []*Font{f}
 	return f, nil
 }
@@ -108,6 +105,8 @@ type Options struct {
 	MaxLines int
 	// Ellipsis goes at the end of the last line if MaxLines removes text. "" is none.
 	Ellipsis string
+	// Features turns OpenType features on or off, such as small capitals.
+	Features Features
 }
 
 // Glyph is one glyph at its position on a line. X and Y are in em, from the
@@ -167,6 +166,7 @@ func (f *Font) input(runes []rune, o Options) shaping.Input {
 	return shaping.Input{
 		Text: runes, RunEnd: len(runes), Direction: direction(o), Face: f.face,
 		Size: fixed.I(shapeSize), Language: language.NewLanguage(o.Language),
+		FontFeatures: o.Features.list(),
 	}
 }
 
@@ -471,17 +471,50 @@ func (f *Font) Add(p *slug.Pack, g Glyph) (slug.Entry, error) {
 		return slug.Entry{}, err
 	}
 	if !color {
-		outline, err := f.outlines.Glyph(g.ID)
-		if err != nil {
-			return slug.Entry{}, fmt.Errorf("text: %w", err)
+		if drawing, err = f.outline(g.ID); err != nil {
+			return slug.Entry{}, err
 		}
-		drawing = outline.Drawing
 	}
 	drawing, err = f.style.apply(drawing)
 	if err != nil {
 		return slug.Entry{}, fmt.Errorf("text: %w", err)
 	}
 	return p.Add(key, drawing)
+}
+
+// outline returns glyph id as one layer, in font units with Y up. A glyph without
+// contours has no layers.
+func (f *Font) outline(id uint32) (slug.Drawing, error) {
+	d := slug.Drawing{Em: float32(f.face.Upem())}
+	g, ok := f.face.GlyphDataOutline(gofont.GID(id))
+	if id > math.MaxUint16 || !ok {
+		return d, fmt.Errorf("text: glyph %d has no outline", id)
+	}
+	if len(g.Segments) == 0 {
+		return d, nil
+	}
+	pt := func(p ot.SegmentPoint) slug.Point { return slug.Point{X: p.X, Y: p.Y} }
+	var path slug.Path
+	for i, s := range g.Segments {
+		a := s.Args
+		switch s.Op {
+		case ot.SegmentOpMoveTo:
+			// The font leaves contours open. Close them, because a stroke puts caps on an open contour.
+			if i > 0 {
+				path.Close()
+			}
+			path.MoveTo(pt(a[0]))
+		case ot.SegmentOpLineTo:
+			path.LineTo(pt(a[0]))
+		case ot.SegmentOpQuadTo:
+			path.QuadTo(pt(a[0]), pt(a[1]))
+		case ot.SegmentOpCubeTo:
+			path.CubeTo(pt(a[0]), pt(a[1]), pt(a[2]))
+		}
+	}
+	path.Close()
+	d.Layers = []slug.Layer{{Path: path}}
+	return d, nil
 }
 
 // At returns the matrix from the em space of g to a Y-down space, in which the
