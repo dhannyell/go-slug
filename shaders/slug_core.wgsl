@@ -157,6 +157,22 @@ fn slug_coverage(l: SlugLayer, coord: vec2f, pixels_per_em: vec2f) -> f32 {
     return slug_combine(x, y, l.rule);
 }
 
+// slug_clip returns the coverage of the clip of layer i: the union of its clip
+// records. A layer without a clip has 1.
+fn slug_clip(i: u32, coord: vec2f, pixels_per_em: vec2f) -> f32 {
+    let clip_ref = slug_layer(i * 24u + 3u);
+    let count = clip_ref & 0xFFu;
+    if count == 0u {
+        return 1.0;
+    }
+    let first = i + (clip_ref >> 8u);
+    var outside = 1.0;
+    for (var k = 0u; k < count; k++) {
+        outside *= 1.0 - slug_coverage(slug_layer_at(first + k), coord, pixels_per_em);
+    }
+    return 1.0 - outside;
+}
+
 // slug_stop_color returns the color of a stop, or of the first word of its color.
 fn slug_stop_color(word: u32) -> vec4f {
     return vec4f(

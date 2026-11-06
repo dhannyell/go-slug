@@ -302,6 +302,38 @@ func TestRasterizeLayers(t *testing.T) {
 	check(14, [4]uint8{0, 0, 0, 0})
 }
 
+// A clip keeps the union of its paths; its records survive Encode and stay out of
+// LayerCount.
+func TestRasterizeClip(t *testing.T) {
+	var p Pack
+	move := Affine{1, 0, 0, 1, 24, 0}
+	e := mustAdd(t, &p, 1, Drawing{Em: rasterEm, Layers: []Layer{{
+		Path: squarePath(0, 0, 32),
+		Clip: []ClipPath{{Path: squarePath(0, 0, 8)}, {Path: squarePath(0, 0, 8), Transform: &move}},
+	}}})
+	if e.LayerCount != 1 || len(p.Layers()) != 3*LayerWords {
+		t.Fatalf("LayerCount %d and %d records, want 1 and 3", e.LayerCount, len(p.Layers())/LayerWords)
+	}
+	if want := (Rect{Point{0, 0}, Point{0.5, 0.125}}); e.Bounds != want {
+		t.Errorf("bounds %v, want %v: the curves inside the clip", e.Bounds, want)
+	}
+	back, err := Decode(p.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []*Pack{&p, back} {
+		dst := image.NewRGBA(image.Rect(0, 0, 32, 8))
+		if err := q.Rasterize(e, pixelView, white, dst); err != nil {
+			t.Fatal(err)
+		}
+		for x, want := range map[int]uint8{4: 255, 16: 0, 28: 255} {
+			if got := dst.RGBAAt(x, 4).A; got != want {
+				t.Errorf("alpha at x=%d = %d, want %d", x, got, want)
+			}
+		}
+	}
+}
+
 // Em space is Y-up and an image is Y-down: the usual view flips Y.
 func TestRasterizeFlippedView(t *testing.T) {
 	var p Pack

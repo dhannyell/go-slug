@@ -47,7 +47,8 @@ func sheared(p slug.Paint) slug.Paint {
 	return p
 }
 
-// gradients shows each kind and spread, the two mixes of alpha, a stroke and text.
+// gradients shows each kind and spread, the two mixes of alpha, a stroke, a clip and
+// text.
 func (s *Scene) gradients() error {
 	center := slug.Point{X: 0.5, Y: 0.5}
 	shapes := []slug.Paint{
@@ -83,7 +84,18 @@ func (s *Scene) gradients() error {
 	if err := s.add(slug.Key{Source: sourceGradient, ID: uint32(len(shapes))}, outline, place, ink); err != nil {
 		return err
 	}
-	return s.gradientText("gradients", 150, 40, 500, uint32(len(shapes)+1))
+
+	// The clip keeps the disc inside the union of two smaller circles.
+	clipped := slug.Drawing{Em: 1, Layers: []slug.Layer{{
+		Path:  circle(0.5, 0.5, 0.5),
+		Paint: slug.SweepPaint(center, 0, 2*math.Pi, rainbow...),
+		Clip:  []slug.ClipPath{{Path: circle(0.32, 0.5, 0.3)}, {Path: circle(0.68, 0.5, 0.3)}},
+	}}}
+	place = slug.Affine{size, 0, 0, -size, 30 + 5*step, 150 + step}
+	if err := s.add(slug.Key{Source: sourceGradient, ID: uint32(len(shapes) + 1)}, clipped, place, ink); err != nil {
+		return err
+	}
+	return s.gradientText("gradients", 150, 40, 500, uint32(len(shapes)+2))
 }
 
 // gradientText paints a line with one gradient. Each glyph has its own space, so its
