@@ -13,7 +13,7 @@ var ErrInvalidPack = errors.New("slug: invalid pack data")
 
 const (
 	packMagic   = "SLUG"
-	packVersion = 2
+	packVersion = 3
 
 	entryWords = 8
 	stampWords = 9 // the source, then 32 bytes
@@ -82,8 +82,8 @@ func Decode(data []byte) (*Pack, error) {
 	if len(data) < 8 || string(data[:4]) != packMagic {
 		return nil, fmt.Errorf("%w: no header", ErrInvalidPack)
 	}
-	// Version 2 only adds paint kinds, so version 1 data has the same meaning.
-	if v := binary.LittleEndian.Uint32(data[4:]); v != 1 && v != packVersion {
+	// Versions 2 and 3 only add paint kinds and clips, so older data has the same meaning.
+	if v := binary.LittleEndian.Uint32(data[4:]); v < 1 || v > packVersion {
 		return nil, fmt.Errorf("%w: version %d", ErrInvalidPack, v)
 	}
 

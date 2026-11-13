@@ -1,6 +1,7 @@
 package text
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -54,7 +55,7 @@ func (f *Font) colorDrawing(id uint32) (d slug.Drawing, approx int, ok bool, err
 	if !ok {
 		return d, 0, false, nil
 	}
-	w := colorWalker{f: f, colr: colr, palette: f.face.Font.CPAL[f.palette]}
+	w := colorWalker{f: f, colr: colr, palette: f.face.Font.CPAL[f.palette], coords: f.face.Coords(), alpha: 1}
 	w.drawing.Em = float32(f.face.Upem())
 	if err := w.paint(root, slug.Identity(), 0); err != nil {
 		return d, 0, true, fmt.Errorf("text: color glyph %d: %w", id, err)
@@ -67,8 +68,13 @@ type colorWalker struct {
 	f       *Font
 	colr    *tables.COLR1
 	palette []tables.ColorRecord
+	coords  []tables.Coord // the axes of the font; nil is the default instance
 	drawing slug.Drawing
 	approx  int
+
+	clip  []slug.ClipPath  // the clip of the next layers
+	alpha float32          // multiplies the alpha of the next layers
+	mask  *[]slug.ClipPath // if set, the walk collects outlines here and draws nothing
 }
 
 // paint adds the layers of p. m maps the space of p to font units.
@@ -76,14 +82,14 @@ func (w *colorWalker) paint(p tables.PaintTable, m slug.Affine, depth int) error
 	if depth > maxPaintDepth {
 		return fmt.Errorf("the paints are deeper than %d", maxPaintDepth)
 	}
-	p = withoutVariation(p)
+	p = w.vary(p)
 	if t, child, ok := transformOf(p); ok {
 		return w.paint(child, t.Then(m), depth+1)
 	}
 	switch p := p.(type) {
 	case tables.PaintColrLayersResolved: // version 0
 		for _, l := range p {
-			if err := w.fill(uint32(l.GlyphID), tables.PaintSolid{PaletteIndex: l.PaletteIndex, Alpha: 1 << 14}, m, slug.Identity()); err != nil {
+			if err := w.fill(uint32(l.GlyphID), tables.PaintSolid{PaletteIndex: l.PaletteIndex, Alpha: 1 << 14}, m, slug.Identity(), depth+1); err != nil {
 				return err
 			}
 		}
@@ -104,52 +110,219 @@ func (w *colorWalker) paint(p tables.PaintTable, m slug.Affine, depth int) error
 		}
 		return w.paint(child, m, depth+1)
 	case tables.PaintGlyph:
-		return w.fill(uint32(p.GlyphID), p.Paint, m, slug.Identity())
+		return w.fill(uint32(p.GlyphID), p.Paint, m, slug.Identity(), depth+1)
 	case tables.PaintComposite:
-		// A composite mode needs a layer off the screen. The backdrop alone is closer
-		// than a source over it.
-		w.approx++
-		return w.paint(p.BackdropPaint, m, depth+1)
+		return w.composite(p, m, depth+1)
 	default:
-		// A fill without a glyph covers the clip box. No real font needs it yet.
-		w.approx++
+		w.flood(p, m)
 	}
 	return nil
+}
+
+// composite adds the layers of one composite mode. A mode that needs a layer off the
+// screen draws the backdrop alone.
+func (w *colorWalker) composite(p tables.PaintComposite, m slug.Affine, depth int) error {
+	src, dst := p.SourcePaint, p.BackdropPaint
+	draw := func(q tables.PaintTable) error { return w.paint(q, m, depth) }
+	switch p.CompositeMode {
+	case tables.CompositeClear:
+		return nil
+	case tables.CompositeSrc:
+		return draw(src)
+	case tables.CompositeDest:
+		return draw(dst)
+	case tables.CompositeSrcOver:
+		return errors.Join(draw(dst), draw(src))
+	case tables.CompositeDestOver:
+		return errors.Join(draw(src), draw(dst))
+	case tables.CompositeSrcIn:
+		return w.inside(src, dst, m, depth)
+	case tables.CompositeDestIn:
+		return w.inside(dst, src, m, depth)
+	case tables.CompositeSrcAtop:
+		return errors.Join(draw(dst), w.inside(src, dst, m, depth))
+	case tables.CompositeDestAtop:
+		return errors.Join(draw(src), w.inside(dst, src, m, depth))
+	}
+	w.approx++
+	return draw(dst)
+}
+
+// inside adds the layers of content where mask covers. It is exact for an opaque mask.
+func (w *colorWalker) inside(content, mask tables.PaintTable, m slug.Affine, depth int) error {
+	q := w.vary(mask)
+	for {
+		_, child, ok := transformOf(q)
+		if !ok {
+			break
+		}
+		q = w.vary(child)
+	}
+	// A solid without a glyph covers all: it changes only the alpha.
+	if s, ok := q.(tables.PaintSolid); ok {
+		saved := w.alpha
+		w.alpha *= w.color(s.PaletteIndex, s.Alpha)[3]
+		err := w.paint(content, m, depth)
+		w.alpha = saved
+		return err
+	}
+
+	var shapes []slug.ClipPath
+	savedMask, savedClip, savedAlpha := w.mask, w.clip, w.alpha
+	w.mask, w.clip, w.alpha = &shapes, nil, 1
+	err := w.paint(mask, m, depth)
+	w.mask, w.clip, w.alpha = savedMask, savedClip, savedAlpha
+	if err != nil || len(shapes) == 0 {
+		return err // an empty mask hides the content
+	}
+	if w.mask != nil || len(shapes) > slug.MaxClipPaths {
+		// A mask inside a mask, or a large mask, keeps all of the content.
+		w.approx++
+		return w.paint(content, m, depth)
+	}
+	return w.within(shapes, func() error { return w.paint(content, m, depth) })
+}
+
+// within runs add with clip on the next layers. The core has one clip for each layer,
+// so an inner clip replaces an outer clip.
+func (w *colorWalker) within(clip []slug.ClipPath, add func() error) error {
+	saved := w.clip
+	if saved != nil {
+		w.approx++
+	}
+	w.clip = clip
+	err := add()
+	w.clip = saved
+	return err
+}
+
+// flood adds a paint without a glyph. It covers the clip; without a clip it would
+// cover the clip box, and no real font needs that yet.
+func (w *colorWalker) flood(p tables.PaintTable, m slug.Affine) {
+	paint, ok := w.paintOf(p, m)
+	if !ok || w.clip == nil || w.mask != nil {
+		w.approx++
+		return
+	}
+	if paint == none {
+		return
+	}
+	box := clipBounds(w.clip)
+	var path slug.Path
+	path.MoveTo(box.Min)
+	path.LineTo(slug.Point{X: box.Max.X, Y: box.Min.Y})
+	path.LineTo(box.Max)
+	path.LineTo(slug.Point{X: box.Min.X, Y: box.Max.Y})
+	path.Close()
+	w.drawing.Layers = append(w.drawing.Layers, slug.Layer{Path: path, Paint: w.fade(paint), Clip: w.clip})
 }
 
 // fill adds the outline of glyph id with the paint p. m maps font units of the glyph to
 // font units of the color glyph; inner maps the space of p to the font units of the
 // glyph.
-func (w *colorWalker) fill(id uint32, p tables.PaintTable, m, inner slug.Affine) error {
+func (w *colorWalker) fill(id uint32, p tables.PaintTable, m, inner slug.Affine, depth int) error {
 	for {
-		p = withoutVariation(p)
+		p = w.vary(p)
 		t, child, ok := transformOf(p)
 		if !ok {
 			break
 		}
 		p, inner = child, t.Then(inner)
 	}
+	outline, err := w.f.outline(id)
+	if err != nil {
+		return err
+	}
+	var tm *slug.Affine
+	if m != slug.Identity() {
+		tm = &m
+	}
 	paint, ok := w.paintOf(p, inner)
 	if !ok {
-		// A glyph inside a glyph is a clip, and the core has none yet.
-		w.approx++
-		return nil
+		// Other paints inside a glyph draw only inside the glyph.
+		var clip []slug.ClipPath
+		for _, l := range outline.Layers {
+			clip = append(clip, slug.ClipPath{Path: l.Path, Transform: tm})
+		}
+		if clip == nil {
+			return nil
+		}
+		return w.within(clip, func() error { return w.paint(p, inner.Then(m), depth+1) })
 	}
 	if paint == none {
 		return nil
 	}
-	outline, err := w.f.outlines.Glyph(id)
-	if err != nil {
-		return err
-	}
-	for _, l := range outline.Drawing.Layers {
-		l.Paint = paint
-		if m != slug.Identity() {
-			l.Transform = &m
+	for _, l := range outline.Layers {
+		if w.mask != nil {
+			if !opaque(paint) {
+				w.approx++ // the clip has no alpha
+			}
+			*w.mask = append(*w.mask, slug.ClipPath{Path: l.Path, Transform: tm})
+			continue
 		}
+		l.Paint = w.fade(paint)
+		l.Transform = tm
+		l.Clip = w.clip
 		w.drawing.Layers = append(w.drawing.Layers, l)
 	}
 	return nil
+}
+
+// fade multiplies the alpha of p by the alpha of the walk.
+func (w *colorWalker) fade(p slug.Paint) slug.Paint {
+	if w.alpha == 1 {
+		return p
+	}
+	switch p.Kind {
+	case slug.CurrentColor:
+		w.approx++ // CurrentColor has no alpha of its own
+	case slug.Solid:
+		p.Color[3] *= w.alpha
+	default:
+		g := *p.Gradient
+		g.Stops = slices.Clone(g.Stops)
+		for i := range g.Stops {
+			g.Stops[i].Color[3] *= w.alpha
+		}
+		p.Gradient = &g
+	}
+	return p
+}
+
+// opaque reports a paint without transparent parts. The color of the host counts as opaque.
+func opaque(p slug.Paint) bool {
+	switch p.Kind {
+	case slug.CurrentColor:
+		return true
+	case slug.Solid:
+		return p.Color[3] == 1
+	}
+	for _, s := range p.Gradient.Stops {
+		if s.Color[3] != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+// clipBounds returns a box around the points of the clip paths.
+func clipBounds(clip []slug.ClipPath) slug.Rect {
+	first := true
+	var r slug.Rect
+	for _, c := range clip {
+		for _, q := range c.Path.Points {
+			if c.Transform != nil {
+				q = c.Transform.Apply(q)
+			}
+			if first {
+				r, first = slug.Rect{Min: q, Max: q}, false
+				continue
+			}
+			r.Min = slug.Point{X: min(r.Min.X, q.X), Y: min(r.Min.Y, q.Y)}
+			r.Max = slug.Point{X: max(r.Max.X, q.X), Y: max(r.Max.Y, q.Y)}
+		}
+	}
+	return r
 }
 
 // paintOf returns the slug paint of a solid or a gradient. inner maps the space of p
@@ -278,49 +451,108 @@ func around(m slug.Affine, cx, cy int16) slug.Affine {
 	return m
 }
 
-// withoutVariation returns the default instance of a variable paint: the deltas of a
-// variable font wait for the support of variations.
-func withoutVariation(p tables.PaintTable) tables.PaintTable {
+// vary returns the plain paint of a variable paint, with the deltas of the axes of the
+// font added. Each value keeps the type of its field, as the specification requires.
+func (w *colorWalker) vary(p tables.PaintTable) tables.PaintTable {
 	switch p := p.(type) {
 	case tables.PaintVarSolid:
-		return tables.PaintSolid{PaletteIndex: p.PaletteIndex, Alpha: p.Alpha}
+		d := w.deltas(p.VarIndexBase, 1)
+		return tables.PaintSolid{PaletteIndex: p.PaletteIndex, Alpha: addF214(p.Alpha, d[0])}
 	case tables.PaintVarLinearGradient:
-		return tables.PaintLinearGradient{ColorLine: plainLine(p.ColorLine), X0: p.X0, Y0: p.Y0, X1: p.X1, Y1: p.Y1, X2: p.X2, Y2: p.Y2}
+		d := w.deltas(p.VarIndexBase, 6)
+		return tables.PaintLinearGradient{ColorLine: w.line(p.ColorLine),
+			X0: addI16(p.X0, d[0]), Y0: addI16(p.Y0, d[1]), X1: addI16(p.X1, d[2]), Y1: addI16(p.Y1, d[3]), X2: addI16(p.X2, d[4]), Y2: addI16(p.Y2, d[5])}
 	case tables.PaintVarRadialGradient:
-		return tables.PaintRadialGradient{ColorLine: plainLine(p.ColorLine), X0: p.X0, Y0: p.Y0, Radius0: p.Radius0, X1: p.X1, Y1: p.Y1, Radius1: p.Radius1}
+		d := w.deltas(p.VarIndexBase, 6)
+		return tables.PaintRadialGradient{ColorLine: w.line(p.ColorLine),
+			X0: addI16(p.X0, d[0]), Y0: addI16(p.Y0, d[1]), Radius0: addU16(p.Radius0, d[2]),
+			X1: addI16(p.X1, d[3]), Y1: addI16(p.Y1, d[4]), Radius1: addU16(p.Radius1, d[5])}
 	case tables.PaintVarSweepGradient:
-		return tables.PaintSweepGradient{ColorLine: plainLine(p.ColorLine), CenterX: p.CenterX, CenterY: p.CenterY, StartAngle: p.StartAngle, EndAngle: p.EndAngle}
+		d := w.deltas(p.VarIndexBase, 4)
+		return tables.PaintSweepGradient{ColorLine: w.line(p.ColorLine), CenterX: addI16(p.CenterX, d[0]), CenterY: addI16(p.CenterY, d[1]),
+			StartAngle: addF214(p.StartAngle, d[2]), EndAngle: addF214(p.EndAngle, d[3])}
 	case tables.PaintVarTransform:
 		t := p.Transform
-		return tables.PaintTransform{Paint: p.Paint, Transform: tables.Affine2x3{Xx: t.Xx, Yx: t.Yx, Xy: t.Xy, Yy: t.Yy, Dx: t.Dx, Dy: t.Dy}}
+		d := w.deltas(t.VarIndexBase, 6)
+		const unit = 1 << 16 // a delta of a 16.16 field
+		return tables.PaintTransform{Paint: p.Paint, Transform: tables.Affine2x3{
+			Xx: t.Xx + d[0]/unit, Yx: t.Yx + d[1]/unit, Xy: t.Xy + d[2]/unit, Yy: t.Yy + d[3]/unit, Dx: t.Dx + d[4]/unit, Dy: t.Dy + d[5]/unit}}
 	case tables.PaintVarTranslate:
-		return tables.PaintTranslate{Paint: p.Paint, Dx: p.Dx, Dy: p.Dy}
+		d := w.deltas(p.VarIndexBase, 2)
+		return tables.PaintTranslate{Paint: p.Paint, Dx: addI16(p.Dx, d[0]), Dy: addI16(p.Dy, d[1])}
 	case tables.PaintVarScale:
-		return tables.PaintScale{Paint: p.Paint, ScaleX: p.ScaleX, ScaleY: p.ScaleY}
+		d := w.deltas(p.VarIndexBase, 2)
+		return tables.PaintScale{Paint: p.Paint, ScaleX: addF214(p.ScaleX, d[0]), ScaleY: addF214(p.ScaleY, d[1])}
 	case tables.PaintVarScaleAroundCenter:
-		return tables.PaintScaleAroundCenter{Paint: p.Paint, ScaleX: p.ScaleX, ScaleY: p.ScaleY, CenterX: p.CenterX, CenterY: p.CenterY}
+		d := w.deltas(p.VarIndexBase, 4)
+		return tables.PaintScaleAroundCenter{Paint: p.Paint, ScaleX: addF214(p.ScaleX, d[0]), ScaleY: addF214(p.ScaleY, d[1]),
+			CenterX: addI16(p.CenterX, d[2]), CenterY: addI16(p.CenterY, d[3])}
 	case tables.PaintVarScaleUniform:
-		return tables.PaintScaleUniform{Paint: p.Paint, Scale: p.Scale}
+		d := w.deltas(p.VarIndexBase, 1)
+		return tables.PaintScaleUniform{Paint: p.Paint, Scale: addF214(p.Scale, d[0])}
 	case tables.PaintVarScaleUniformAroundCenter:
-		return tables.PaintScaleUniformAroundCenter{Paint: p.Paint, Scale: p.Scale, CenterX: p.CenterX, CenterY: p.CenterY}
+		d := w.deltas(p.VarIndexBase, 3)
+		return tables.PaintScaleUniformAroundCenter{Paint: p.Paint, Scale: addF214(p.Scale, d[0]), CenterX: addI16(p.CenterX, d[1]), CenterY: addI16(p.CenterY, d[2])}
 	case tables.PaintVarRotate:
-		return tables.PaintRotate{Paint: p.Paint, Angle: p.Angle}
+		d := w.deltas(p.VarIndexBase, 1)
+		return tables.PaintRotate{Paint: p.Paint, Angle: addF214(p.Angle, d[0])}
 	case tables.PaintVarRotateAroundCenter:
-		return tables.PaintRotateAroundCenter{Paint: p.Paint, Angle: p.Angle, CenterX: p.CenterX, CenterY: p.CenterY}
+		d := w.deltas(p.VarIndexBase, 3)
+		return tables.PaintRotateAroundCenter{Paint: p.Paint, Angle: addF214(p.Angle, d[0]), CenterX: addI16(p.CenterX, d[1]), CenterY: addI16(p.CenterY, d[2])}
 	case tables.PaintVarSkew:
-		return tables.PaintSkew{Paint: p.Paint, XSkewAngle: p.XSkewAngle, YSkewAngle: p.YSkewAngle}
+		d := w.deltas(p.VarIndexBase, 2)
+		return tables.PaintSkew{Paint: p.Paint, XSkewAngle: addF214(p.XSkewAngle, d[0]), YSkewAngle: addF214(p.YSkewAngle, d[1])}
 	case tables.PaintVarSkewAroundCenter:
-		return tables.PaintSkewAroundCenter{Paint: p.Paint, XSkewAngle: p.XSkewAngle, YSkewAngle: p.YSkewAngle, CenterX: p.CenterX, CenterY: p.CenterY}
+		d := w.deltas(p.VarIndexBase, 4)
+		return tables.PaintSkewAroundCenter{Paint: p.Paint, XSkewAngle: addF214(p.XSkewAngle, d[0]), YSkewAngle: addF214(p.YSkewAngle, d[1]),
+			CenterX: addI16(p.CenterX, d[2]), CenterY: addI16(p.CenterY, d[3])}
 	}
 	return p
 }
 
-func plainLine(l tables.VarColorLine) tables.ColorLine {
+// line returns the plain color line of a variable color line.
+func (w *colorWalker) line(l tables.VarColorLine) tables.ColorLine {
 	out := tables.ColorLine{Extend: l.Extend, ColorStops: make([]tables.ColorStop, len(l.ColorStops))}
 	for i, s := range l.ColorStops {
-		out.ColorStops[i] = tables.ColorStop{StopOffset: s.StopOffset, PaletteIndex: s.PaletteIndex, Alpha: s.Alpha}
+		d := w.deltas(s.VarIndexBase, 2)
+		out.ColorStops[i] = tables.ColorStop{StopOffset: addF214(s.StopOffset, d[0]), PaletteIndex: s.PaletteIndex, Alpha: addF214(s.Alpha, d[1])}
 	}
 	return out
+}
+
+// noVariation is the VarIndexBase of a value without deltas.
+const noVariation = 0xFFFFFFFF
+
+// deltas returns the deltas of n consecutive values from base, in the units of each field.
+func (w *colorWalker) deltas(base uint32, n int) [6]float32 {
+	var d [6]float32
+	store := w.colr.ItemVariationStore
+	if base == noVariation || store == nil || len(w.coords) == 0 {
+		return d
+	}
+	for k := range n {
+		i := base + uint32(k)
+		// Without a map, the index holds the outer index in its high 16 bits.
+		at := tables.VariationStoreIndex{DeltaSetOuter: uint16(i >> 16), DeltaSetInner: uint16(i)}
+		if m := w.colr.VarIndexMap; m != nil && len(m.Map) > 0 {
+			at = m.Map[min(int(i), len(m.Map)-1)]
+		}
+		d[k] = store.GetDelta(at, w.coords)
+	}
+	return d
+}
+
+func addI16(v int16, d float32) int16 {
+	return int16(min(max(math.Round(float64(v)+float64(d)), math.MinInt16), math.MaxInt16))
+}
+
+func addU16(v uint16, d float32) uint16 {
+	return uint16(min(max(math.Round(float64(v)+float64(d)), 0), math.MaxUint16))
+}
+
+// addF214 adds a delta in units of 1/16384.
+func addF214(v tables.Fixed214, d float32) tables.Fixed214 {
+	return tables.Fixed214(addI16(int16(v), d))
 }
 
 // f214 reads a 2.14 fixed point number.

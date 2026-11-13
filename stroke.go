@@ -94,11 +94,30 @@ func (d Drawing) Stroke(s Stroke) (Drawing, error) {
 	return d.mapPaths(func(p Path) (Path, error) { return p.Stroke(s) })
 }
 
-// Embolden returns d with Path.Embolden applied to each layer.
+// Embolden returns d with Path.Embolden applied to each layer and to each path of
+// its Clip, so a clip grows with the shapes inside it.
 func (d Drawing) Embolden(amount float32) (Drawing, error) {
-	return d.mapPaths(func(p Path) (Path, error) { return p.Embolden(amount) })
+	d, err := d.mapPaths(func(p Path) (Path, error) { return p.Embolden(amount) })
+	if err != nil {
+		return d, err
+	}
+	for i, layer := range d.Layers {
+		if layer.Clip == nil {
+			continue
+		}
+		clip := make([]ClipPath, len(layer.Clip))
+		for k, c := range layer.Clip {
+			if c.Path, err = c.Path.Embolden(amount); err != nil {
+				return Drawing{}, fmt.Errorf("layer %d, clip %d: %w", i, k, err)
+			}
+			clip[k] = c
+		}
+		d.Layers[i].Clip = clip
+	}
+	return d, nil
 }
 
+// mapPaths changes the path of each layer. It keeps each Clip.
 func (d Drawing) mapPaths(change func(Path) (Path, error)) (Drawing, error) {
 	layers := make([]Layer, len(d.Layers))
 	for i, layer := range d.Layers {

@@ -220,6 +220,18 @@ type Layer struct {
 	Path      Path
 	Paint     Paint
 	Transform *Affine // nil means identity
+	// Clip limits the layer to the union of these paths. Layer.Transform does not
+	// apply to them. Nil draws the whole layer. A layer has at most MaxClipPaths.
+	Clip []ClipPath
+}
+
+// MaxClipPaths is the largest number of paths in one Layer.Clip.
+const MaxClipPaths = 255
+
+// ClipPath is one path of a Layer.Clip.
+type ClipPath struct {
+	Path      Path
+	Transform *Affine // maps Path to drawing units; nil means identity
 }
 
 // Drawing is one complete shape: a glyph, an icon or an emoji.

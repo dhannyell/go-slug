@@ -72,6 +72,8 @@ type layerRecord struct {
 	bounds        Rect
 	color         [4]float32
 	gradient      layerGradient
+	clips         uint32 // the number of clip records
+	firstClip     uint32 // the index of the first clip record
 }
 
 func (p *Pack) layerAt(i uint32) layerRecord {
@@ -87,6 +89,10 @@ func (p *Pack) layerAt(i uint32) layerRecord {
 		offset:  Point{f(r[6]), f(r[7])},
 		bounds:  Rect{Point{f(r[8]), f(r[9])}, Point{f(r[10]), f(r[11])}},
 		color:   [4]float32{f(r[12]), f(r[13]), f(r[14]), f(r[15])},
+		clips:   r[3] & 0xFF,
+	}
+	if l.clips > 0 {
+		l.firstClip = i + r[3]>>8
 	}
 	if l.kind >= LinearGradient {
 		l.gradient = layerGradient{
@@ -118,7 +124,7 @@ func (p *Pack) eachPixel(l layerRecord, view, inverse Affine, area image.Rectang
 		for dx := range r.Dx() {
 			x, y := r.Min.X+dx, r.Min.Y+dy
 			coord := inverse.Apply(Point{float32(x) + 0.5, float32(y) + 0.5})
-			visit(x, y, coord, p.coverageAt(l, coord, pixelsPerEm))
+			visit(x, y, coord, p.coverageAt(l, coord, pixelsPerEm)*p.clipAt(l, coord, pixelsPerEm))
 		}
 	}
 }
@@ -159,6 +165,19 @@ func (p *Pack) coverageAt(l layerRecord, coord, pixelsPerEm Point) float32 {
 	xcov, xwgt := p.rayCoverage(p.bandList(l, h), coord, false, pixelsPerEm.X)
 	ycov, ywgt := p.rayCoverage(p.bandList(l, l.nH+v), coord, true, pixelsPerEm.Y)
 	return combine(xcov, ycov, xwgt, ywgt, l.rule)
+}
+
+// clipAt returns the coverage of the union of the clip of l, as 1 minus the product of
+// the parts outside each path. A layer without a clip has 1.
+func (p *Pack) clipAt(l layerRecord, coord, pixelsPerEm Point) float32 {
+	if l.clips == 0 {
+		return 1
+	}
+	outside := float32(1)
+	for k := range l.clips {
+		outside *= 1 - p.coverageAt(p.layerAt(l.firstClip+k), coord, pixelsPerEm)
+	}
+	return 1 - outside
 }
 
 // bandList returns the curve list of a band. The vertical bands come after the

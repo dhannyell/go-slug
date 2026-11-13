@@ -1,8 +1,8 @@
 # go-slug data format
 
 A `Pack` holds three GPU arrays and one table. This document describes the
-arrays, and the bytes of `Pack.Encode`. The current version is **2**. Version 2 adds the gradient
-paint kinds. A reader of version 2 also reads version 1.
+arrays, and the bytes of `Pack.Encode`. The current version is **3**. Version 2 adds the gradient
+paint kinds. Version 3 adds clips. A reader of version 3 also reads versions 1 and 2.
 
 All coordinates are in em space, Y-up: drawing units divided by `Drawing.Em`. A
 host gets a position in pixels when it multiplies a coordinate by the size of
@@ -76,13 +76,28 @@ v = clamp(int(x * scaleX + offsetX), 0, nV - 1)
 |---|---|---|
 | 0 | `bandLoc` | first word of the band data |
 | 1 | `bandCounts` | `nH` in bits 0-15, `nV` in bits 16-31 |
-| 2 | `flags` | bits 0-7: fill rule (0 non-zero, 1 even-odd); bits 8-15: paint kind (0 current color, 1 solid, 2 linear gradient, 3 radial gradient, 4 sweep gradient); bits 16-23: blend, **reserved**, 0; bits 24-31: **reserved**, 0 |
-| 3 | `clipRef` | **reserved**, 0 |
+| 2 | `flags` | bits 0-7: fill rule (0 non-zero, 1 even-odd); bits 8-15: paint kind (0 current color, 1 solid, 2 linear gradient, 3 radial gradient, 4 sweep gradient, 5 clip); bits 16-23: blend, **reserved**, 0; bits 24-31: **reserved**, 0 |
+| 3 | `clipRef` | bits 0-7: the number of clip records, 0 for a layer without a clip; bits 8-31: the distance in records from this record to the first clip record |
 | 4-7 | banding (`float32`) | `scaleX`, `scaleY`, `offsetX`, `offsetY` |
 | 8-11 | bounds (`float32`) | min x, min y, max x, max y |
 | 12-15 | color (`float32`) | red, green, blue, alpha; straight RGB in sRGB, linear alpha; only a solid paint reads it |
 | 16-21 | transform (`float32`) | **reserved**, the identity: 1, 0, 0, 1, 0, 0. The curves already include `Layer.Transform` |
 | 22-23 | | **reserved**, 0 |
+
+### Clips
+
+A clip record has the paint kind 5, and draws nothing. Its band data is the shape
+of one clip path. The clip records of a layer are consecutive, and they come after
+the last layer of the entry, so `LayerCount` does not include them.
+
+A reader multiplies the coverage of a layer by the coverage of its clip:
+
+```text
+clip = 1 - (1 - coverage(clip 0)) * (1 - coverage(clip 1)) * ...
+```
+
+The bounds of a layer with a clip are the bounds of its curves inside the bounds of
+its clip records. The banding fields use the bounds of the curves.
 
 A layer with a gradient kind uses words 12 to 22 in a different way:
 

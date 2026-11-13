@@ -86,26 +86,51 @@ func (p *Pack) Add(key Key, d Drawing) (Entry, error) {
 		if err := toEm(&shapes[i], d.Em); err != nil {
 			return Entry{}, err
 		}
+		for k := range shapes[i].Clip {
+			if err := toEm(&shapes[i].Clip[k], d.Em); err != nil {
+				return Entry{}, err
+			}
+		}
 	}
 
+	first := len(p.layers) / LayerWords
 	e := Entry{
 		Key:        key,
-		FirstLayer: uint32(len(p.layers) / LayerWords),
+		FirstLayer: uint32(first),
 		LayerCount: uint32(len(shapes)),
 	}
 	curves, bands, layers := len(p.curves), len(p.bands), len(p.layers)
+	undo := func() {
+		// appendShape writes only after these lengths, so this removes all of d.
+		p.curves, p.bands, p.layers = p.curves[:curves], p.bands[:bands], p.layers[:layers]
+	}
 	for i, s := range shapes {
+		box, _ := s.box()
 		if i == 0 {
-			e.Bounds = s.Bounds
+			e.Bounds = box
 		} else {
-			e.Bounds = union(e.Bounds, s.Bounds)
+			e.Bounds = union(e.Bounds, box)
 		}
-		p.appendShape(s)
+		p.appendShape(s, box)
+	}
+	// The clip records come after the layers of the entry, so a host does not draw them.
+	for i, s := range shapes {
+		if len(s.Clip) == 0 {
+			continue
+		}
+		distance := len(p.layers)/LayerWords - (first + i)
+		if distance >= 1<<24 {
+			undo()
+			return Entry{}, fmt.Errorf("slug: a clip is %d records after its layer, and the limit is %d", distance, 1<<24-1)
+		}
+		p.layers[(first+i)*LayerWords+3] = uint32(len(s.Clip)) | uint32(distance)<<8
+		for _, c := range s.Clip {
+			p.appendShape(c, c.Bounds)
+		}
 	}
 	if p.MaxBytes > 0 && p.Size() > p.MaxBytes {
 		size := p.Size()
-		// appendShape writes only after these lengths, so this removes all of d.
-		p.curves, p.bands, p.layers = p.curves[:curves], p.bands[:bands], p.layers[:layers]
+		undo()
 		return Entry{}, fmt.Errorf("%w: needs %d bytes, and the limit is %d", ErrPackFull, size, p.MaxBytes)
 	}
 	p.register(e)
@@ -207,7 +232,8 @@ func (p *Pack) register(e Entry) {
 	p.entries = append(p.entries, e)
 }
 
-func (p *Pack) appendShape(s shape) {
+// appendShape writes one layer record. box is the area that the layer can draw.
+func (p *Pack) appendShape(s shape, box Rect) {
 	locs := p.appendCurves(s.Curves)
 	set := buildBands(s.Curves, s.Bounds, bandOverlap)
 	bandLoc := p.appendBands(set, locs)
@@ -227,9 +253,9 @@ func (p *Pack) appendShape(s shape) {
 		bandLoc,
 		uint32(len(set.H))|uint32(len(set.V))<<16,
 		uint32(s.Rule)|uint32(s.Paint.Kind)<<8,
-		0, // clip reference: reserved
+		0, // clipRef: Add sets it after it writes the clip records
 		f(scaleX), f(scaleY), f(offsetX), f(offsetY),
-		f(s.Bounds.Min.X), f(s.Bounds.Min.Y), f(s.Bounds.Max.X), f(s.Bounds.Max.Y),
+		f(box.Min.X), f(box.Min.Y), f(box.Max.X), f(box.Max.Y),
 	)
 	p.layers = append(p.layers, paint[:]...)
 }

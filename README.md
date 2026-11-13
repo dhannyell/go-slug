@@ -21,6 +21,7 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - [Quick start](#quick-start)
 - [Draw on the GPU](#draw-on-the-gpu)
 - [Fill with a gradient](#fill-with-a-gradient)
+- [Clip a layer](#clip-a-layer)
 - [Shape text](#shape-text)
 - [Limit the memory](#limit-the-memory)
 - [Warm up and bake](#warm-up-and-bake)
@@ -36,7 +37,8 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
 - **No graphics API dependency.** The library produces data buffers and WGSL code
   that any WebGPU host can use.
 - **Fonts, icons and shapes.** A `Drawing` has layers of filled paths, with fill rules,
-  transforms, solid colors and gradients. The `font` package reads TrueType and OpenType glyphs.
+  transforms, solid colors, gradients and clip paths. The `font` package reads TrueType
+  and OpenType glyphs.
 - **Exact perspective.** A plane in 3D needs only its matrix.
 - **Incremental upload.** A `Pack` is an arena with an optional limit. `TakeDirty` tells
   which data is new, and `Reset` empties it for a new generation.
@@ -46,7 +48,8 @@ a drag turns the newspaper, and the wheel zooms. The demo needs a browser with W
   the oracle of the WGSL code.
 - **Optional text shaping.** The [`text`](text) module adds kerning, ligatures,
   right-to-left text, line breaks, alignment, font fallback, styled spans, line metrics
-  caret positions and synthetic bold, slant and outline.
+  caret positions, synthetic bold, slant and outline, variable fonts, OpenType features
+  and color glyphs.
 - **Strokes.** `Path.Stroke` turns a line into a fill, with caps and joins, and
   `Path.Embolden` moves the edges of a shape out.
 - **Gradients.** `LinearPaint`, `RadialPaint` and `SweepPaint` fill a layer with stops,
@@ -176,6 +179,22 @@ entry, err := pack.Add(key, slug.Drawing{Em: 1, Layers: []slug.Layer{{Path: path
 A custom shader gets the color from `slug_paint`. `slug_reference.wgsl` shows the call.
 A shader that does not call it draws a gradient in the color of its instance.
 
+## Clip a layer
+
+`Layer.Clip` keeps a layer inside the union of its clip paths. Each clip path has its
+own transform, and the transform of the layer does not apply to it:
+
+```go
+layer := slug.Layer{
+	Path:  disc,
+	Paint: paint,
+	Clip:  []slug.ClipPath{{Path: left}, {Path: right}},
+}
+```
+
+A custom shader multiplies its coverage by `slug_clip`. `slug_reference.wgsl` shows the
+call.
+
 ## Shape text
 
 > [!NOTE]
@@ -242,6 +261,20 @@ for _, g := range fill.Shape("office", text.Options{})[0].Glyphs {
 }
 ```
 
+A variable font has axes, such as the weight. `Vary` returns a font at other values of
+the axes, with its own source:
+
+```go
+bold, err := f.Vary([]text.Variation{{Tag: "wght", Value: 700}}, 2)
+```
+
+`Axes` lists the axes of the font. `Options.Features` turns OpenType features on or off:
+
+```go
+features, err := text.ParseFeatures("smcp, -liga, salt=2")
+lines := f.Shape("office", text.Options{Features: features})
+```
+
 A game that draws the same labels in each frame can keep the results in a `ShapeCache`.
 The cache and its callers share each result, so a caller must not change it. A text
 that changes in each frame gains nothing from the cache.
@@ -299,7 +332,10 @@ pack, err := slug.Decode(uiSlug)
 font, err := text.Parse(interTTF, 1) // the same source as the bake
 ```
 
-The file has a stamp of the font, the style and the palette. If the font changes,
+`-vary wght=700` bakes a variable font at other values of its axes, and
+`-features -liga` shapes the runs with other features.
+
+The file has a stamp of the font, the style, the palette and the axes. If the font changes,
 `Add` returns `text.ErrStalePack`, so the program does not draw old glyphs. Make the
 bake again with the new font.
 

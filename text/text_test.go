@@ -3,6 +3,8 @@ package text
 import (
 	"errors"
 	"image"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -52,14 +54,6 @@ func TestLigatureHasAnOutline(t *testing.T) {
 		t.Errorf("the ligature has cluster %d, want 1", got)
 	}
 
-	x, err := f.outlines.GlyphIndex('x')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if line.Glyphs[0].ID != x {
-		t.Errorf("x has ID %d in the shaper and %d in the outline reader", line.Glyphs[0].ID, x)
-	}
-
 	var pack slug.Pack
 	e, err := f.Add(&pack, line.Glyphs[1])
 	if err != nil {
@@ -67,9 +61,6 @@ func TestLigatureHasAnOutline(t *testing.T) {
 	}
 	if e.Key != (slug.Key{Source: 7, ID: line.Glyphs[1].ID}) || e.LayerCount != 1 {
 		t.Errorf("got entry %+v", e)
-	}
-	if _, err := f.outlines.Glyph(line.Glyphs[1].ID); err != nil {
-		t.Error(err)
 	}
 }
 
@@ -249,10 +240,8 @@ func TestAlignMovesTheLine(t *testing.T) {
 // text, or a pointer on the ellipsis selects the start of the text.
 func TestMaxLinesAddsAnEllipsis(t *testing.T) {
 	f := raleway(t)
-	ellipsis, err := f.outlines.GlyphIndex('…')
-	if err != nil {
-		t.Fatal(err)
-	}
+	id, _ := f.face.NominalGlyph('…')
+	ellipsis := uint32(id)
 	const s = "one two three four five"
 
 	lines := f.Shape(s, Options{Width: 5, MaxLines: 2, Ellipsis: "…"})
@@ -805,6 +794,132 @@ func TestPaletteChangesTheColors(t *testing.T) {
 	}
 	if _, err := f.Palette(f.Palettes(), 9); err == nil {
 		t.Error("a palette past the end has no error")
+	}
+}
+
+// testdataFont loads a font of testdata. colr-test.py describes colr-test.ttf.
+func testdataFont(t *testing.T, name string) *Font {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := Parse(data, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// A SrcIn and a glyph inside a glyph draw the square only inside the circle. A SrcIn
+// with a solid mask draws its source.
+func TestColorCompositesClip(t *testing.T) {
+	f := testdataFont(t, "colr-test.ttf")
+	for _, r := range "AB" {
+		g := f.Shape(string(r), Options{})[0].Glyphs[0]
+		d, approx, _, err := f.colorDrawing(g.ID)
+		if err != nil || approx != 0 || len(d.Layers) != 1 || len(d.Layers[0].Clip) != 1 {
+			t.Fatalf("%c: %d layers, %d approximations, %v", r, len(d.Layers), approx, err)
+		}
+		var p slug.Pack
+		e, err := f.Add(&p, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dst := image.NewRGBA(image.Rect(0, 0, 100, 100))
+		if err := p.Rasterize(e, slug.Affine{100, 0, 0, -100, 0, 100}, [4]float32{0, 0, 0, 1}, dst); err != nil {
+			t.Fatal(err)
+		}
+		if corner, center := dst.RGBAAt(2, 97).A, dst.RGBAAt(40, 60).A; corner != 0 || center != 255 {
+			t.Errorf("%c: alpha %d at the corner of the square and %d at the center, want 0 and 255", r, corner, center)
+		}
+	}
+
+	noto := load(t, "color/NotoColorEmoji-Regular.ttf")
+	id, _ := noto.face.NominalGlyph('📖')
+	if _, approx, _, _ := noto.colorDrawing(uint32(id)); approx != 0 {
+		t.Errorf("the open book has %d approximations", approx)
+	}
+}
+
+// The degree sign of Raleway uses the CFF operator flex1.
+func TestCFFFlexGlyph(t *testing.T) {
+	f := raleway(t)
+	var p slug.Pack
+	if e, err := f.Add(&p, f.Shape("°", Options{})[0].Glyphs[0]); err != nil || e.LayerCount == 0 {
+		t.Errorf("entry %+v, %v", e, err)
+	}
+}
+
+// An axis changes the outlines of glyf and CFF2 fonts, the advances, the stamp and the
+// variable paints of COLR.
+func TestVaryChangesTheGlyphs(t *testing.T) {
+	for _, name := range []string{"common/Commissioner-VF.ttf", "toys/CFF2-VF.otf"} {
+		f := load(t, name)
+		axes := f.Axes()
+		if len(axes) == 0 || axes[0].Tag != "wght" {
+			t.Fatalf("%s: axes %v", name, axes)
+		}
+		bold, err := f.Vary([]Variation{{"wght", axes[0].Max}}, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := uint32(1)
+		if gid, ok := f.face.NominalGlyph('A'); ok {
+			id = uint32(gid)
+		}
+		var p slug.Pack
+		a, err := f.Add(&p, Glyph{ID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := bold.Add(&p, Glyph{ID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.Bounds == b.Bounds {
+			t.Errorf("%s: wght %v keeps the bounds %v", name, axes[0].Max, a.Bounds)
+		}
+		if f.Stamp() == bold.Stamp() {
+			t.Errorf("%s: the stamp ignores the axes", name)
+		}
+	}
+
+	f := load(t, "common/Commissioner-VF.ttf")
+	if _, err := f.Vary([]Variation{{"wdth", 100}}, 8); err == nil {
+		t.Error("an axis that the font has not has no error")
+	}
+	bold, _ := f.Vary([]Variation{{"wght", 900}}, 8)
+	if a, b := f.Shape("A", Options{})[0].Width, bold.Shape("A", Options{})[0].Width; a == b {
+		t.Errorf("wght 900 keeps the advance %v", a)
+	}
+
+	c := testdataFont(t, "colr-test.ttf")
+	heavy, _ := c.Vary([]Variation{{"wght", 700}}, 8)
+	g := c.Shape("C", Options{})[0].Glyphs[0]
+	d0, _, _, _ := c.colorDrawing(g.ID)
+	d1, _, _, _ := heavy.colorDrawing(g.ID)
+	if a0, a1 := d0.Layers[0].Paint.Color[3], d1.Layers[0].Paint.Color[3]; a0 != 1 || a1 != 0.5 {
+		t.Errorf("the alpha is %v at the default and %v at wght 700, want 1 and 0.5", a0, a1)
+	}
+}
+
+// "-liga" keeps the letters of a ligature apart. A range, a bad value and a long tag are errors.
+func TestFeaturesTurnOffALigature(t *testing.T) {
+	f := raleway(t)
+	off, err := ParseFeatures("-liga, kern=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := f.Shape("office", Options{})[0].Glyphs
+	apart := f.Shape("office", Options{Features: off})[0].Glyphs
+	if len(apart) != 6 || len(plain) >= len(apart) {
+		t.Errorf("%d glyphs with ligatures and %d without, want fewer and 6", len(plain), len(apart))
+	}
+	for _, bad := range []string{"kern[3:5]", "liga=x", "liga=2x", "-liga=1", "ligature"} {
+		if _, err := ParseFeatures(bad); err == nil {
+			t.Errorf("%q has no error", bad)
+		}
 	}
 }
 

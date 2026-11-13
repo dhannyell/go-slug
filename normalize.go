@@ -17,6 +17,27 @@ type shape struct {
 	Paint  Paint
 	// Gradient is set for a gradient kind of Paint.
 	Gradient *gradientRecord
+	// Clip holds the paths of Layer.Clip, with the clip kind.
+	Clip []shape
+}
+
+// kindClip marks the record of a clip path. It is not a PaintKind of the API.
+const kindClip PaintKind = 5
+
+// box returns the area that the layer can draw: its bounds inside its clip.
+func (s shape) box() (Rect, bool) {
+	if len(s.Clip) == 0 {
+		return s.Bounds, true
+	}
+	c := s.Clip[0].Bounds
+	for _, k := range s.Clip[1:] {
+		c = union(c, k.Bounds)
+	}
+	r := Rect{
+		Min: Point{X: max(s.Bounds.Min.X, c.Min.X), Y: max(s.Bounds.Min.Y, c.Min.Y)},
+		Max: Point{X: min(s.Bounds.Max.X, c.Max.X), Y: min(s.Bounds.Max.Y, c.Max.Y)},
+	}
+	return r, r.Min.X < r.Max.X && r.Min.Y < r.Max.Y
 }
 
 // cubicErr is √3/36, the error factor of one cubic-to-quadratic step.
@@ -47,13 +68,47 @@ func normalize(d Drawing, tol float32) ([]shape, error) {
 		if err != nil {
 			return nil, fmt.Errorf("layer %d: %w", li, err)
 		}
-		shapes = append(shapes, shape{
+		clip, err := clipShapes(layer.Clip, tol)
+		if err != nil {
+			return nil, fmt.Errorf("%w: layer %d, %v", ErrInvalidPath, li, err)
+		}
+		s := shape{
 			Curves:   curves,
 			Bounds:   bounds,
 			Rule:     layer.Path.Rule,
 			Paint:    paint,
 			Gradient: gradient,
-		})
+			Clip:     clip,
+		}
+		if layer.Clip != nil && clip == nil {
+			continue // an empty clip hides the layer
+		}
+		if _, ok := s.box(); !ok {
+			continue
+		}
+		shapes = append(shapes, s)
+	}
+	return shapes, nil
+}
+
+// clipShapes converts the paths of a clip. Paths without curves make no shape.
+func clipShapes(clip []ClipPath, tol float32) ([]shape, error) {
+	if len(clip) > MaxClipPaths {
+		return nil, fmt.Errorf("the clip has %d paths, and the limit is %d", len(clip), MaxClipPaths)
+	}
+	var shapes []shape
+	for ci, c := range clip {
+		m := Identity()
+		if c.Transform != nil {
+			m = *c.Transform
+		}
+		curves, err := flattenPath(c.Path, m, tol, nil)
+		if err != nil {
+			return nil, fmt.Errorf("clip %d, %v", ci, err)
+		}
+		if bounds, ok := boundsOf(curves); ok {
+			shapes = append(shapes, shape{Curves: curves, Bounds: bounds, Rule: c.Path.Rule, Paint: Paint{Kind: kindClip}})
+		}
 	}
 	return shapes, nil
 }
